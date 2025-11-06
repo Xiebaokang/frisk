@@ -1,0 +1,6 @@
+.vscode/
+bin/
+build/
+*.so
+__pycache__/
+*.pyc
