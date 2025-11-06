@@ -1,10 +1,10 @@
 #!/bin/bash
 
 if [ -d "./build" ]; then
-    cd build
-    rm -rf *
+  cd build
+  rm -rf *
 else
-    mkdir build && cd build
+  mkdir build && cd build
 fi
 
 cmake  .. -GNinja \
@@ -15,5 +15,8 @@ cmake  .. -GNinja \
 ninja -j32
 
 so_files=(*.so)
+if [ ! -d "../python/Frisk" ]; then
+  mkdir ../python/Frisk
+fi
 cp ./${so_files[0]} ../python/Frisk
 cd ..
