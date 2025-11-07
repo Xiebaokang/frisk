@@ -17,6 +17,13 @@ namespace mlir::frisk {
 
 namespace {
 
+enum class MemorySpace {
+  global = 1,
+  shared = 3,
+  // local = 5,
+  local = 0,
+};
+
 class OpBuilderWithLoc {   // 封装了 OpBuilder IR 构建器
 public:
   OpBuilderWithLoc(MLIRContext *context) {
@@ -129,6 +136,14 @@ void init_ffi_ir_frisk(py::module_ &&m) {
 void init_ffi_ir_builder(py::module_ &m) {
   py::class_<OpBuilder::InsertPoint>(m, "InsertPoint", py::module_local());
 
+  // memroy space
+  py::enum_<MemorySpace>(m, "MemorySpace", py::arithmetic())
+      .value("GLOBAL", MemorySpace::global)
+      .value("SHARED", MemorySpace::shared)
+      .value("LOCAL", MemorySpace::local)
+      .export_values();
+
+  // builder
   py::class_<OpBuilderWithLoc>(m, "builder")
       .def(py::init<MLIRContext *>())
       .def("create_module", [](OpBuilderWithLoc &self) -> ModuleOp { return self.create<ModuleOp>(); })
@@ -210,7 +225,7 @@ void init_ffi_ir_builder(py::module_ &m) {
              return self.create<arith::ConstantOp>(tensor_type, data);
            })
 
-      // type
+      // builder get type
       .def("get_bool_ty", [](OpBuilderWithLoc &self) -> Type { return self.getBuilder().getI8Type(); })
       .def("get_int64_ty", [](OpBuilderWithLoc &self) -> Type { return self.getBuilder().getI64Type(); })
       .def("get_f64_ty", [](OpBuilderWithLoc &self) -> Type { return self.getBuilder().getF64Type(); })
@@ -221,20 +236,26 @@ void init_ffi_ir_builder(py::module_ &m) {
            [](OpBuilderWithLoc &self, Type &elementType, std::vector<int64_t> &shape) -> Type {
              return RankedTensorType::get(shape, elementType);
            })
+      .def("get_memref_ty", 
+           [](OpBuilderWithLoc &self, Type &elementType, std::vector<int64_t> &shape, AffineMap map, MemorySpace space) -> Type {
+             if (!map) {
+              return MemRefType::get(shape, elementType, {}, static_cast<unsigned>(space));
+             }
+             return MemRefType::get(shape, elementType, map, static_cast<unsigned>(space));
+           }, py::arg("elementType"), py::arg("shape"), py::arg("map") = AffineMap(), py::arg("space") = MemorySpace::global)
       .def("get_function_ty",
            [](OpBuilderWithLoc &self, std::vector<Type> inTypes, std::vector<Type> outTypes) -> Type {
              return self.getBuilder().getFunctionType(inTypes, outTypes);
            })
 
-      // locs
+      // builder locs
       .def("set_loc", [](OpBuilderWithLoc &self, Location loc) { self.setLastLoc(loc); })
-      .def("set_loc", [](OpBuilderWithLoc &self, const std::string &fileName, int line,
-                         int column) { self.setLastLoc(fileName, line, column); })
+      .def("set_loc", 
+        [](OpBuilderWithLoc &self, const std::string &fileName, int line, int column) { self.setLastLoc(fileName, line, column); })
       .def("get_loc", [](OpBuilderWithLoc &self) -> Location { return self.getLastLoc(); })
 
-      // op
-      .def(
-          "clone", [](OpBuilderWithLoc &self, Operation &op) -> Operation * { return self.clone(op); }, ret::reference)
+      // builder op
+      .def("clone", [](OpBuilderWithLoc &self, Operation &op) -> Operation * { return self.clone(op); }, ret::reference)
       .def("get_or_insert_function",
            [](OpBuilderWithLoc &self, ModuleOp &module, std::string &funcName, Type &funcType) -> func::FuncOp {
              if (Operation *funcOperation = module.lookupSymbol(funcName))
@@ -244,15 +265,13 @@ void init_ffi_ir_builder(py::module_ &m) {
              }
              throw std::invalid_argument("invalid function type");
            })
-      .def(
-          "create_block",
+      .def("create_block",
           [](OpBuilderWithLoc &self) -> Block * {
             Region *parent = self.getBuilder().getBlock()->getParent();
             return self.getBuilder().createBlock(parent);
           },
           ret::reference)
-      .def(
-          "create_block_with_parent",
+      .def("create_block_with_parent",
           [](OpBuilderWithLoc &self, Region &parent, std::vector<Type> &argTypes) -> Block * {
             // TODO: update arg loc
             auto loc = self.getBuilder().getUnknownLoc();
@@ -260,15 +279,32 @@ void init_ffi_ir_builder(py::module_ &m) {
             return self.getBuilder().createBlock(&parent, {}, argTypes, argLocs);
           },
           ret::reference)
-      .def(
-          "new_block", [](OpBuilderWithLoc &self) -> Block * { return new Block(); }, ret::reference)
-      .def(
-          "ret",
+      .def("new_block", [](OpBuilderWithLoc &self) -> Block * { return new Block(); }, ret::reference)
+      .def("ret",
           [](OpBuilderWithLoc &self, std::vector<Value> &vals) -> OpState { return self.create<func::ReturnOp>(vals); })
-
+      // affine expr
+      .def("get_affine_dim_expr", 
+        [](OpBuilderWithLoc &self, unsigned position) -> AffineExpr { return self.getBuilder().getAffineDimExpr(position); })
+      .def("get_affine_symbol_expr", 
+        [](OpBuilderWithLoc &self, unsigned position) -> AffineExpr { return self.getBuilder().getAffineSymbolExpr(position); })
+      .def("get_affine_constant_expr", 
+        [](OpBuilderWithLoc &self, int64_t constant) -> AffineExpr { return self.getBuilder().getAffineConstantExpr(constant); })
+      // affine map
+        .def("get_empty_affine_map", 
+        [](OpBuilderWithLoc &self) -> AffineMap { return self.getBuilder().getEmptyAffineMap(); })
+      .def("get_dim_identity_map", 
+        [](OpBuilderWithLoc &self) -> AffineMap { return self.getBuilder().getDimIdentityMap(); })
+      .def("get_multi_dim_identity_map", 
+        [](OpBuilderWithLoc &self, unsigned rank) -> AffineMap { return self.getBuilder().getMultiDimIdentityMap(rank); })
+      .def("get_symbol_identity_map", 
+        [](OpBuilderWithLoc &self) -> AffineMap { return self.getBuilder().getSymbolIdentityMap(); })
+      .def("get_single_dim_shift_affine_map", 
+        [](OpBuilderWithLoc &self, int64_t shift) -> AffineMap { return self.getBuilder().getSingleDimShiftAffineMap(shift); })
+      .def("get_shifted_affine_map", 
+        [](OpBuilderWithLoc &self, AffineMap map, int64_t shift) -> AffineMap { return self.getBuilder().getShiftedAffineMap(map, shift); })
       // frisk
       .def("create_gemm",
-           [](OpBuilderWithLoc &self, Value &lhs, Value &rhs) -> Value { return self.create<GemmOp>(lhs, rhs); });
+        [](OpBuilderWithLoc &self, Value &A, Value &B, Value &C) -> void { self.create<GemmOp>(A, B, C); });
 }
 
   // 其他dialect和IR构建所需函数与python绑定部分
@@ -364,8 +400,7 @@ void init_ffi_ir_operation(py::module_ &m) {
                throw pybind11::index_error("Op result index out of range");
              return self->getResult(idx);
            })
-      .def(
-          "get_region",
+      .def("get_region",
           [](OpState &self, unsigned idx) -> Region & {
             if (idx >= self->getNumRegions())
               throw pybind11::index_error("Op region index out of range");
@@ -434,6 +469,232 @@ void init_ffi_ir_operation(py::module_ &m) {
            });
 }
 
+void init_ffi_ir_affine_expr_map(py::module_ &m) {
+  py::class_<AffineMap>(m, "AffineMap", py::module_local())
+    // 构造函数
+    .def(py::init<>())
+    // 静态工厂方法
+    .def_static("get", [](MLIRContext* context) -> AffineMap { return AffineMap::get(context); })
+    .def_static("get", 
+      [](unsigned dimCount, unsigned symbolCount, MLIRContext *context) -> AffineMap { 
+        return AffineMap::get(dimCount, symbolCount, context); 
+      })
+    .def_static("get", 
+      [](unsigned dimCount, unsigned symbolCount, AffineExpr result) -> AffineMap { 
+        return AffineMap::get(dimCount, symbolCount, result); 
+      })
+    .def_static("get", 
+      [](unsigned dimCount, unsigned symbolCount, std::vector<AffineExpr> results, MLIRContext *context) -> AffineMap {
+        return AffineMap::get(dimCount, symbolCount, ArrayRef<AffineExpr>(results), context); 
+      })
+    .def_static("get_constant_map", 
+      [](int64_t val, MLIRContext *context) -> AffineMap { return AffineMap::getConstantMap(val, context); })
+    .def_static("get_multi_dim_identity_map", 
+      [](unsigned numDims, MLIRContext *context) -> AffineMap { return AffineMap::getMultiDimIdentityMap(numDims, context); })
+    .def_static("get_minor_identity_map", 
+      [](unsigned dims, unsigned results, MLIRContext *context) -> AffineMap { 
+        return AffineMap::getMinorIdentityMap(dims, results, context); 
+      })
+    .def_static("get_permutation_map", 
+      [](std::vector<unsigned> permutation, MLIRContext *context) -> AffineMap { 
+        return AffineMap::getPermutationMap(ArrayRef<unsigned>(permutation), context); 
+      })
+    .def_static("get_permutation_map", 
+      [](std::vector<int64_t> permutation, MLIRContext *context) -> AffineMap { 
+        return AffineMap::getPermutationMap(ArrayRef<int64_t>(permutation), context); 
+      })
+    .def_static("get_multi_dim_map_with_targets", 
+      [](unsigned numDims, MLIRContext *context) -> AffineMap { return AffineMap::getMultiDimIdentityMap(numDims, context); })
+    // 比较运算符
+    .def("__eq__", [](const AffineMap &self, const AffineMap &other) { return self == other; })
+    .def("__ne__", [](const AffineMap &self, const AffineMap &other) { return self != other; })
+    .def("__bool__", [](const AffineMap &self) { return static_cast<bool>(self); })
+    .def("__nonzero__", [](const AffineMap &self) { return static_cast<bool>(self); })
+    // 字符串表示
+    .def("__str__", [](AffineMap &self) {
+      std::string str;
+      llvm::raw_string_ostream os(str);
+      self.print(os);
+      return str;
+    })
+    .def("__repr__", [](AffineMap &self) {
+      std::string str;
+      llvm::raw_string_ostream os(str);
+      os << "AffineMap(";
+      self.print(os);
+      os << ")";
+      return str;
+    })
+    // 属性查询
+    .def("get_num_dims", &AffineMap::getNumDims)
+    .def("get_num_symbols", &AffineMap::getNumSymbols)
+    .def("get_num_results", &AffineMap::getNumResults)
+    .def("get_num_inputs", &AffineMap::getNumInputs)
+    // 结果访问
+    .def("get_results", [](AffineMap &self) -> std::vector<AffineExpr> {
+      return std::vector<AffineExpr>(self.getResults().begin(), self.getResults().end());
+    })
+    .def("get_result", &AffineMap::getResult)
+    // 类型检查方法
+    .def("is_identity", &AffineMap::isIdentity)
+    .def("is_symbol_identity", &AffineMap::isSymbolIdentity)
+    .def("is_minor_identity", &AffineMap::isMinorIdentity)
+    .def("is_empty", &AffineMap::isEmpty)
+    .def("is_single_constant", &AffineMap::isSingleConstant)
+    .def("is_constant", &AffineMap::isConstant)
+    .def("is_permutation", &AffineMap::isPermutation)
+    .def("is_projected_permutation", &AffineMap::isProjectedPermutation, py::arg("allow_zero_in_results") = false)
+    // 常量结果获取
+    .def("get_single_constant_result", &AffineMap::getSingleConstantResult)
+    .def("get_constant_results", [](AffineMap &self) {
+      auto results = self.getConstantResults();
+      return std::vector<int64_t>(results.begin(), results.end());
+    })
+    // 维度位置查询
+    .def("get_dim_position", &AffineMap::getDimPosition, py::arg("idx"))
+    .def("get_result_position", [](AffineMap &self, AffineExpr input) -> py::object {
+      auto result = self.getResultPosition(input);
+      if (result.has_value())
+        return py::cast(result.value());
+      return py::none();
+    }, py::arg("input"));
+
+
+  // AffineExprKind
+  py::enum_<AffineExprKind>(m, "AffineExprKind", py::module_local())
+    .value("Add", AffineExprKind::Add)
+    .value("Mul", AffineExprKind::Mul) 
+    .value("Mod", AffineExprKind::Mod)
+    .value("FloorDiv", AffineExprKind::FloorDiv)
+    .value("CeilDiv", AffineExprKind::CeilDiv)
+    .value("LAST_AFFINE_BINARY_OP", AffineExprKind::LAST_AFFINE_BINARY_OP)
+    .value("Constant", AffineExprKind::Constant)
+    .value("DimId", AffineExprKind::DimId)
+    .value("SymbolId", AffineExprKind::SymbolId)
+    .export_values();
+
+  py::class_<AffineExpr>(m, "AffineExpr", py::module_local())
+    // 构造函数
+    .def(py::init<>())
+    // 比较运算符
+    .def("__eq__", [](const AffineExpr &self, const AffineExpr &other) { return self == other; })
+    .def("__eq__", [](const AffineExpr &self, int64_t v) { return self == v; })
+    .def("__ne__", [](const AffineExpr &self, const AffineExpr &other) { return self != other; })
+    .def("__ne__", [](const AffineExpr &self, int64_t v) { return self != v; })
+    .def("__bool__", [](const AffineExpr &self) { return static_cast<bool>(self); })
+    .def("__nonzero__", [](const AffineExpr &self) { return static_cast<bool>(self); })
+    // 字符串表示
+    .def("__str__", [](AffineExpr &self) {
+      std::string str;
+      llvm::raw_string_ostream os(str);
+      self.print(os);
+      return str;
+    })
+    .def("__repr__", [](AffineExpr &self) {
+      std::string str;
+      llvm::raw_string_ostream os(str);
+      os << "AffineExpr(";
+      self.print(os);
+      os << ")";
+      return str;
+    })
+    // 属性查询方法
+    .def("get_context", &AffineExpr::getContext)
+    .def("get_kind", &AffineExpr::getKind)
+    .def("is_symbolic_or_constant", &AffineExpr::isSymbolicOrConstant)
+    .def("is_pure_affine", &AffineExpr::isPureAffine)
+    .def("get_largest_known_divisor", &AffineExpr::getLargestKnownDivisor)
+    .def("is_multiple_of", &AffineExpr::isMultipleOf)
+    .def("is_function_of_dim", &AffineExpr::isFunctionOfDim)
+    .def("is_function_of_symbol", &AffineExpr::isFunctionOfSymbol)
+    // 替换方法
+    .def("replace_dims_and_symbols", &AffineExpr::replaceDimsAndSymbols)
+    .def("replace_dims", &AffineExpr::replaceDims)
+    .def("replace_symbols", &AffineExpr::replaceSymbols)
+    .def("replace", 
+      [](const AffineExpr &self, AffineExpr target, AffineExpr replacement) { return self.replace(target, replacement); })
+    .def("replace_with_map", 
+      [](const AffineExpr &self, const DenseMap<AffineExpr, AffineExpr> &map) { return self.replace(map); })
+    // 移位方法
+    .def("shift_dims", &AffineExpr::shiftDims, py::arg("num_dims"), py::arg("shift"), py::arg("offset") = 0)
+    .def("shift_symbols", &AffineExpr::shiftSymbols, py::arg("num_symbols"), py::arg("shift"), py::arg("offset") = 0)
+    // 算术运算符
+    .def("__add__", [](const AffineExpr &self, int64_t v) { return self + v; })
+    .def("__add__", [](const AffineExpr &self, const AffineExpr &other) { return self + other; })
+    .def("__radd__", [](const AffineExpr &self, int64_t v) { return self + v; })
+    .def("__neg__", [](const AffineExpr &self) { return -self; })
+    .def("__sub__", [](const AffineExpr &self, int64_t v) { return self - v; })
+    .def("__sub__", [](const AffineExpr &self, const AffineExpr &other) { return self - other; })
+    .def("__rsub__", [](const AffineExpr &self, int64_t v) { return AffineExpr() + v - self; })
+    .def("__mul__", [](const AffineExpr &self, int64_t v) { return self * v; })
+    .def("__mul__", [](const AffineExpr &self, const AffineExpr &other) { return self * other; })
+    .def("__rmul__", [](const AffineExpr &self, int64_t v) { return self * v; })
+    // 特殊的算术操作
+    .def("floor_div", [](const AffineExpr &self, uint64_t v) { return self.floorDiv(v); })
+    .def("floor_div", [](const AffineExpr &self, AffineExpr other) { return self.floorDiv(other); })
+    .def("ceil_div", [](const AffineExpr &self, uint64_t v) { return self.ceilDiv(v); })
+    .def("ceil_div", [](const AffineExpr &self, AffineExpr other) { return self.ceilDiv(other); })
+    .def("__mod__", [](const AffineExpr &self, uint64_t v) { return self % v; })
+    .def("__mod__", [](const AffineExpr &self, AffineExpr other) { return self % other; })
+    // 组合方法
+    .def("compose", &AffineExpr::compose)
+    // dyn_cast
+    .def("as_binary", [](AffineExpr &self) -> py::object {
+      if (auto binary = dyn_cast<AffineBinaryOpExpr>(self)) {
+        return py::cast(binary);
+      }
+      return py::none();
+    })
+    .def("as_dim", [](AffineExpr &self) -> py::object {
+      if (auto dim = dyn_cast<AffineDimExpr>(self)) {
+        return py::cast(dim);
+      }
+      return py::none();
+    })
+    .def("as_symbol", [](AffineExpr &self) -> py::object {
+      if (auto symbol = dyn_cast<AffineSymbolExpr>(self)) {
+        return py::cast(symbol);
+      }
+      return py::none();
+    })
+    .def("as_constant", [](AffineExpr &self) -> py::object {
+      if (auto constant = dyn_cast<AffineConstantExpr>(self)) {
+        return py::cast(constant);
+      }
+      return py::none();
+    });
+    
+  // AffineBinaryOpExpr 绑定
+  py::class_<AffineBinaryOpExpr, AffineExpr>(m, "AffineBinaryOpExpr", py::module_local())
+    .def("get_lhs", &AffineBinaryOpExpr::getLHS)
+    .def("get_rhs", &AffineBinaryOpExpr::getRHS);
+
+  // AffineDimExpr 绑定
+  py::class_<AffineDimExpr, AffineExpr>(m, "AffineDimExpr", py::module_local())
+    .def("get_position", &AffineDimExpr::getPosition);
+
+  // AffineSymbolExpr 绑定  
+  py::class_<AffineSymbolExpr, AffineExpr>(m, "AffineSymbolExpr", py::module_local())
+    .def("get_position", &AffineSymbolExpr::getPosition);
+
+  // AffineConstantExpr 绑定
+  py::class_<AffineConstantExpr, AffineExpr>(m, "AffineConstantExpr", py::module_local())
+    .def("get_value", &AffineConstantExpr::getValue);
+
+  //基础表达式创建函数
+  m.def("get_affine_dim_expr", &getAffineDimExpr);
+  m.def("get_affine_symbol_expr", &getAffineSymbolExpr);
+  m.def("get_affine_constant_expr", &getAffineConstantExpr);
+  m.def("get_affine_constant_exprs", &getAffineConstantExprs);
+  m.def("get_affine_binary_op_expr", &getAffineBinaryOpExpr);
+  // 复杂表达式构造
+  m.def("get_affine_expr_from_flat_form", &getAffineExprFromFlatForm);
+  // 表达式简化
+  m.def("simplify_affine_expr", &simplifyAffineExpr);
+  // 边界分析
+  m.def("get_bound_for_affine_expr", &getBoundForAffineExpr);
+}
+
 void init_ffi_ir_common(py::module_ &m) {
   py::class_<MLIRContext>(m, "context", py::module_local())
       .def(py::init<>())
@@ -468,17 +729,36 @@ void init_ffi_ir_common(py::module_ &m) {
       .def("get_rank", &RankedTensorType::getRank)
       .def("get_shape", [](RankedTensorType &self) -> std::vector<int64_t> { return self.getShape(); })
       .def("get_element_ty", &RankedTensorType::getElementType);
+  
+  py::class_<MemRefType, Type>(m, "memref_buffer", py::module_local())
+      .def("get_rank", &MemRefType::getRank)
+      .def("get_dim_size", &MemRefType::getDimSize)
+      .def("get_elem_width", &MemRefType::getElementTypeBitWidth)
+      .def("get_shape", [](MemRefType &self) -> std::vector<int64_t> { return self.getShape(); })
+      .def("get_element_ty", &MemRefType::getElementType)
+      .def("get_memory_space", [](MemRefType &self) -> std::optional<MemorySpace> {
+        if (auto spaceAttr = dyn_cast<IntegerAttr>(self.getMemorySpace())) {
+          int64_t spaceValue = spaceAttr.getInt();
+          return std::optional<MemorySpace>{static_cast<MemorySpace>(spaceValue)};
+        }
+        return std::optional<MemorySpace>{};
+      })
+      .def("get_layout_map", [](MemRefType &self) -> AffineMap {
+        auto layout = self.getLayout();
+        return layout.getAffineMap();
+      });
 
   py::class_<FunctionType>(m, "function_type", py::module_local()).def("param_types", [](FunctionType &self) {
     return std::vector<Type>(self.getInputs().begin(), self.getInputs().end());
   });
 
-  py::class_<Location>(m, "location", py::module_local()).def("__str__", [](Location &self) {
-    std::string str;
-    llvm::raw_string_ostream os(str);
-    self.print(os);
-    return os.str();
-  });
+  py::class_<Location>(m, "location", py::module_local())
+      .def("__str__", [](Location &self) {
+        std::string str;
+        llvm::raw_string_ostream os(str);
+        self.print(os);
+        return os.str();
+      });
 
   py::class_<Value>(m, "value", py::module_local())
       .def("get_context", &Value::getContext)
@@ -574,6 +854,7 @@ void init_ffi_ir(py::module_ &&m) {
   init_ffi_ir_common(m);
   init_ffi_ir_operation(m);
   init_ffi_ir_common_op(m);
+  init_ffi_ir_affine_expr_map(m);
   init_ffi_ir_builder(m);
   init_ffi_ir_frisk(m.def_submodule("frisk"));
 }

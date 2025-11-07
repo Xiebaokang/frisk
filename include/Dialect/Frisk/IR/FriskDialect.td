@@ -17,6 +17,7 @@ def Frisk_Dialect : Dialect {
 
   let dependentDialects = [
     "::mlir::affine::AffineDialect",
+    "::mlir::memref::MemRefDialect",
     "::mlir::func::FuncDialect",
     "::mlir::arith::ArithDialect",
     "::mlir::math::MathDialect",
@@ -24,7 +25,7 @@ def Frisk_Dialect : Dialect {
     "::mlir::cf::ControlFlowDialect"
   ];
 
-  let useDefaultAttributePrinterParser = 1;
+  // let useDefaultAttributePrinterParser = 1;
 }
 
 #endif // FRISK_DIALECT

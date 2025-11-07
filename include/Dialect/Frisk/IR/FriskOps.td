@@ -21,15 +21,14 @@ class Frisk_Op<string mnemonic, list<Trait> traits = []> :
 
 
 def Frisk_GemmOp: Frisk_Op<"gemm", [Pure, InferTypeOpAdaptor]> {
-  let summary = "gemm";
+  let summary = "General matrix multiplication operation";
   let description = [{}];
   let arguments = (ins
-    AnyRankedTensor:$lhs,
-    AnyRankedTensor:$rhs
+    AnyMemRef:$A,
+    AnyMemRef:$B,
+    AnyMemRef:$C
   );
-
-  let results = (outs AnyRankedTensor:$result);
-  // let assemblyFormat = "$operand `,` `type` `=` $dst_type attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = "$A `,` $B `,` $C attr-dict `:` type(operands)" ;
 }
 
 // def Frisk_CopyOp: Frisk_Op<"copy", [Pure, InferTypeOpAdaptor]> {

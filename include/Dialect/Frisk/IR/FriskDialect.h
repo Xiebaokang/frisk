@@ -1,13 +1,16 @@
 #ifndef FRISK_DIELACT_H_
 #define FRISK_DIELACT_H_
 
+// dialect
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+
 
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dialect.h"
