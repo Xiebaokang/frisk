@@ -54,6 +54,6 @@ export PYTHONPATH=~/install/path/frisk/python:$PYTHONPATH
 Here's a simple example demonstrating how to create a GEMM IR expression:
 ```bash
 cd ~/install/path/frisk/test
-python example_gemm.py
+python bind_test.py
 ```
 This will generate and execute a GEMM kernel using the Frisk compiler.
