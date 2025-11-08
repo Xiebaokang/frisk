@@ -19,8 +19,226 @@ include "mlir/Interfaces/InferTypeOpInterface.td" // SameOperandsAndResultRank
 class Frisk_Op<string mnemonic, list<Trait> traits = []> : 
   Op<Frisk_Dialect, mnemonic, traits>;
 
+def ImplicitFriskTerminator : SingleBlockImplicitTerminator<"EndOp">;
 
-def Frisk_GemmOp: Frisk_Op<"gemm", [Pure, InferTypeOpAdaptor]> {
+// KernelOp
+def Frisk_KernelOp : Frisk_Op<"kernel", [ImplicitFriskTerminator]> {
+    let summary = "Kernel operation";
+  let description = [{
+    A simple kernel operation that represents a compute kernel.
+  }];
+
+  let arguments = (ins
+    StrAttr:$sym_name,
+    TypeAttr:$function_type
+  );
+
+  let regions = (region SizedRegion<1>:$region);
+
+  let builders = [
+    OpBuilder<(ins "StringRef":$name, "FunctionType":$type)>
+  ];
+
+  let extraClassDeclaration = [{
+    unsigned getNumArguments() {
+      return getBody(0)->getNumArguments();
+    }
+
+    BlockArgument getArgument(unsigned idx) {
+      return getBody(0)->getArgument(idx);
+    }
+
+    Block* addEntryBlock() {
+      auto& region = getRegion();
+      if (!region.empty()) {
+        llvm_unreachable("entry block already exists");
+      }
+      auto* entry = new Block;
+      region.push_back(entry);
+      // block add args
+      mlir::Type funcType = getFunctionType();
+      if (auto funcTy = mlir::dyn_cast<FunctionType>(funcType)) {
+        for (auto type : funcTy.getInputs()) {
+          entry->addArgument(type, getLoc());
+        }
+      }
+      mlir::OpBuilder builder(entry, entry->begin());
+      builder.create<EndOp>(getLoc());
+      return entry;
+    }
+  }];
+
+  let hasCustomAssemblyFormat = 1;
+
+  let hasVerifier = 1;
+}
+
+// parallelOp
+def Frisk_ParallelOp : Frisk_Op<"parallel", [Pure, HasParent<"KernelOp">, ImplicitFriskTerminator]> {
+  let summary = "parallel opeartion";
+  let description = [{
+    parallel
+  }];
+
+  let arguments = (ins
+    I64Attr:$threads,
+    DenseI64ArrayAttr:$ranges
+  );
+
+  let regions = (region SizedRegion<1>:$region);
+
+  let builders = [
+    OpBuilder<(ins "ArrayRef<int64_t>":$ranges, "int64_t":$thread_num)>
+  ];
+
+  let extraClassDeclaration = [{
+    std::vector<int64_t> getGrid() {
+      std::vector<int64_t> ranges;
+      for (auto range : getRangesAttr().asArrayRef()) {
+        ranges.push_back(range);
+      }
+      return ranges;
+    }
+
+    unsigned getGridDims() { 
+      return getRangesAttr().size(); 
+    }
+
+    int64_t getThreadNum() {
+      return getThreads();
+    }
+
+    MutableArrayRef<BlockArgument> getIVs() {
+      return getBody()->getArguments();
+    }
+
+    Block* addEntryBlock() {
+      auto& region = getRegion();
+      if (!region.empty()) {
+        llvm_unreachable("entry block already exists");
+      }
+      auto* entry = new Block;
+      region.push_back(entry);
+      for (unsigned i=0; i<getGridDims(); i++) {
+        entry->addArgument(IndexType::get(getContext()), getLoc());
+      }
+      mlir::OpBuilder builder(entry, entry->begin());
+      builder.create<EndOp>(getLoc());
+      return entry;
+    }
+  }];
+
+  let hasVerifier = 0;
+  let hasCustomAssemblyFormat = 1;
+}
+
+// blockOp
+def Frisk_BlockOp : Frisk_Op<"block", [Pure, ImplicitFriskTerminator]> {
+  let summary = "block opeartion";
+  let description = [{
+    block
+  }];
+
+  let arguments = (ins
+    DenseI64ArrayAttr:$ranges
+  );
+
+  let regions = (region SizedRegion<1>:$region);
+
+  let builders = [
+    OpBuilder<(ins "ArrayRef<int64_t>":$ranges, 
+               CArg<"function_ref<void(ValueRange)>", "nullptr">:$bodyBuilder)>
+  ];
+
+  let extraClassDeclaration = [{
+    using BodyBuilderFn = function_ref<void(ValueRange)>;
+
+    std::vector<int64_t> getBlockRanges() {
+      std::vector<int64_t> ranges;
+      for (auto range : getRangesAttr().asArrayRef()) {
+        ranges.push_back(range);
+      }
+      return ranges;
+    }
+
+    int64_t getIterationNum() {
+      int64_t iter_num = 1;
+      for (int64_t range : getBlockRanges()) {
+        iter_num *= range;
+      }
+      return iter_num;
+    }
+
+    int64_t getBlockDim() {
+      return getRangesAttr().size();
+    }
+
+    MutableArrayRef<BlockArgument> getIVs() {
+      return getBody()->getArguments();
+    }
+  }];
+
+  let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
+}
+
+// for
+def Frisk_ForOp : Frisk_Op<"for", [Pure, ImplicitFriskTerminator]> {
+  let summary = "for opeartion";
+  let description = [{
+    for
+  }];
+
+  let arguments = (ins I64Attr:$lower, I64Attr:$upper, I64Attr:$step);
+
+  let regions = (region SizedRegion<1>:$region);
+
+  let builders = [OpBuilder<(ins "int64_t":$lowerBound, 
+                  "int64_t":$upperBound,
+              CArg<"int64_t", "1">:$step, 
+              CArg<"function_ref<void(Value)>", "nullptr">:$bodyBuilder)>];
+  
+  let extraClassDeclaration = [{
+    using BodyBuilderFn = function_ref<void(Value)>;
+
+    BlockArgument getInductionVar() { return getBody()->getArgument(0); }
+    Block::BlockArgListType getRegionIterArgs() {
+      return getBody()->getArguments().drop_front();
+    }
+
+    // /// Returns information about the lower bound as a single object.
+    // int64_t getLowerBound() { return getProperties().lower; }
+
+    // /// Returns information about the upper bound as a single object.
+    // int64_t getUpperBound() { return getProperties().upper; }
+
+    // /// Returns loop step.
+    // int64_t getStep() { return getProperties().step; }
+  }];
+
+  let hasVerifier = 0;
+  let hasCustomAssemblyFormat = 1;
+}
+
+// EndOp
+def Frisk_EndOp : Frisk_Op<"end", [Terminator, ReturnLike]> {
+  let summary = "Invisible kernel termination operation";
+  let description = [{
+    An invisible terminator operation for frisk kernels that dose not appear in printed IR.
+  }];
+
+  let arguments = (ins);
+
+  let builders = [
+    OpBuilder<(ins), [{ build($_builder, $_state, {}); }]>
+  ];
+
+  let hasVerifier = 0;
+  let assemblyFormat = "attr-dict";
+}
+
+// gemmOp
+def Frisk_GemmOp: Frisk_Op<"gemm", [Pure]> {
   let summary = "General matrix multiplication operation";
   let description = [{}];
   let arguments = (ins
@@ -28,20 +246,48 @@ def Frisk_GemmOp: Frisk_Op<"gemm", [Pure, InferTypeOpAdaptor]> {
     AnyMemRef:$B,
     AnyMemRef:$C
   );
-  let assemblyFormat = "$A `,` $B `,` $C attr-dict `:` type(operands)" ;
+
+  let extraClassDeclaration = [{
+    Value getMatrixA() { return getOperand(0); }
+    Value getMatrixB() { return getOperand(1); }
+    Value getMatrixC() { return getOperand(2); }
+    ValueRange getAllMatrix() {
+      return getOperation()->getOperands();
+    }
+  }];
+
+  let hasVerifier = 1;
+  let assemblyFormat = "`(` $A `,` $B `,` $C `)` attr-dict `:` type($A) `,` type($B) `,` type($C)";
 }
 
-// def Frisk_CopyOp: Frisk_Op<"copy", [Pure, InferTypeOpAdaptor]> {
-//   let summary = "copy";
+// allocOp
+def Frisk_AllocBufferOp: Frisk_Op<"alloc_buffer", [Pure]> {
 
-//   let description = [{}];
+}
 
-//   let arguments = (ins 
-//     AnyRankedTensor:$src,
-//     AnyRankedTensor:$dst
-//   );
+// copyOp
+def Frisk_CopyOp: Frisk_Op<"copy", [Pure]> {
+  // let summary = "copy";
+  // let description = [{ 
+  //   copy
+  // }];
 
-//   // let assemblyFormat = "$inputs attr-dict `:` functional-type(operands, results)";
-// }
+  // let arguments = (ins 
+  //   AnyRankedTensor:$src,
+  //   AnyRankedTensor:$dst
+  // );
+
+  // let assemblyFormat = "$inputs attr-dict `:` functional-type(operands, results)";
+}
+
+// fillOp
+def Frisk_FillOp: Frisk_Op<"fill", [Pure]> {
+
+}
+
+// reduceOp
+def Frisk_ReduceOp: Frisk_Op<"reduce", [Pure]> {
+
+}
 
 #endif // FRISK_OPS

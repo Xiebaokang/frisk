@@ -15,94 +15,6 @@ namespace py = pybind11;
 
 namespace mlir::frisk {
 
-namespace {
-
-enum class MemorySpace {
-  global = 1,
-  shared = 3,
-  // local = 5,
-  local = 0,
-};
-
-class OpBuilderWithLoc {   // 封装了 OpBuilder IR 构建器
-public:
-  OpBuilderWithLoc(MLIRContext *context) {
-    builder = std::make_unique<OpBuilder>(context);
-    lastLoc = std::make_unique<Location>(builder->getUnknownLoc());
-  }
-
-  OpBuilder &getBuilder() { return *builder; }
-
-  void setLastLoc(Location loc) { lastLoc = std::make_unique<Location>(loc); }
-
-  void setLastLoc(const std::string &fileName, int line, int column) {
-    auto context = builder->getContext();
-    setLastLoc(FileLineColLoc::get(context, fileName, line, column));
-  }
-
-  Location getLastLoc() {
-    assert(lastLoc);
-    return *lastLoc;
-  }
-
-  void setInsertionPointToStart(Block &block) {
-    if (!block.empty())
-      setLastLoc(block.begin()->getLoc());
-    else
-      setLastLoc(builder->getUnknownLoc());
-    builder->setInsertionPointToStart(&block);
-  }
-
-  void setInsertionPointToEnd(Block &block) {
-    if (!block.empty())
-      setLastLoc(block.back().getLoc());
-    else
-      setLastLoc(builder->getUnknownLoc());
-    builder->setInsertionPointToEnd(&block);
-  }
-
-  void setInsertionPointAfter(Operation &op) {
-    setLastLoc(op.getLoc());
-    builder->setInsertionPointAfter(&op);
-  }
-
-  void restoreInsertionPoint(OpBuilder::InsertPoint pt) {
-    if (pt.isSet() && pt.getPoint() != pt.getBlock()->end())
-      setLastLoc(pt.getPoint()->getLoc());
-    else
-      setLastLoc(builder->getUnknownLoc());
-    builder->restoreInsertionPoint(pt);
-  }
-
-  Operation *clone(Operation &op) { return builder->clone(op); }
-
-  template <typename OpTy, typename... Args>
-  OpTy create(Args &&...args) {
-    auto loc = getLastLoc();
-    return builder->create<OpTy>(loc, std::forward<Args>(args)...);
-  }
-
-  // Overload to create or fold a single result operation.
-  template <typename OpTy, typename... Args>
-  std::enable_if_t<OpTy::template hasTrait<OpTrait::OneResult>(), Value> createOrFold(Args &&...args) {
-    auto loc = getLastLoc();
-    return builder->createOrFold<OpTy>(loc, std::forward<Args>(args)...);
-  }
-
-  // Overload to create or fold a zero result operation.
-  template <typename OpTy, typename... Args>
-  std::enable_if_t<OpTy::template hasTrait<OpTrait::ZeroResults>(), OpTy> createOrFold(Args &&...args) {
-    auto loc = getLastLoc();
-    return builder->createOrFold<OpTy>(loc, std::forward<Args>(args)...);
-  }
-
-private:
-  std::unique_ptr<OpBuilder> builder;
-  std::unique_ptr<Location> lastLoc;
-};
-
-} // namespace
- 
   // *** C++ 绑定 python  IR 创建部分 ***
 using ret = py::return_value_policy;
 
@@ -129,7 +41,52 @@ void init_ffi_ir_frisk(py::module_ &&m) {
           return py::cast(op);
         else
           return py::none();
-      });
+      })
+      .def("get_matrix_A", &GemmOp::getMatrixA)
+      .def("get_matrix_B", &GemmOp::getMatrixB)
+      .def("get_matrix_C", &GemmOp::getMatrixC)
+      .def("get_all_matrix", &GemmOp::getAllMatrix);
+
+  // kernel op
+  py::class_<KernelOp, OpState>(m, "KernelOp", py::module_local())
+      .def("arg", [](KernelOp &self, unsigned idx) -> BlockArgument {
+          if (idx >= self.getNumArguments())
+            throw pybind11::index_error("Kernel argument index out of range");
+          return self.getArgument(idx);
+        })
+      .def("get_num_arguments", &KernelOp::getNumArguments)
+      .def("add_entry_block", [](KernelOp &self) -> Block * { return self.addEntryBlock(); }, ret::reference)
+      .def_property_readonly("type", &KernelOp::getFunctionType);
+  
+  // parallel op
+  py::class_<ParallelOp, OpState>(m, "ParallelOp", py::module_local())
+      .def("get_ivs", [](ParallelOp &self) -> std::vector<BlockArgument> {
+        std::vector<BlockArgument> ivs;
+        for (auto &&arg : self.getIVs()) { ivs.push_back(arg); }
+        return ivs;
+        })
+      .def("get_grid", &ParallelOp::getGrid)
+      .def("get_thread_num", &ParallelOp::getThreadNum)
+      .def("get_grid_dim", &ParallelOp::getGridDims)
+      .def("add_entry_block", [](ParallelOp &self) -> Block * { return self.addEntryBlock(); }, ret::reference);
+  
+  // block Op
+  py::class_<BlockOp, OpState>(m, "BlockOp", py::module_local())
+      .def("get_ivs", [](BlockOp &self) -> std::vector<BlockArgument> {
+        std::vector<BlockArgument> ivs;
+        for (auto &&arg : self.getIVs()) { ivs.push_back(arg); }
+        return ivs;
+        })
+      .def("get_block_ranges", &BlockOp::getBlockRanges)
+      .def("get_iteration_num", &BlockOp::getIterationNum)
+      .def("get_block_dim", &BlockOp::getBlockDim);
+
+  // for Op
+  py::class_<ForOp, OpState>(m, "ForOp", py::module_local())
+      .def("get_induction_var", &ForOp::getInductionVar)
+      .def("get_lower_bound", &ForOp::getLower)
+      .def("get_upper_bound", &ForOp::getUpper)
+      .def("get_step", &ForOp::getStep);
 }
 
   // OpBuilder 构建器的与python绑定部分
@@ -247,6 +204,11 @@ void init_ffi_ir_builder(py::module_ &m) {
            [](OpBuilderWithLoc &self, std::vector<Type> inTypes, std::vector<Type> outTypes) -> Type {
              return self.getBuilder().getFunctionType(inTypes, outTypes);
            })
+      .def("get_kernel_ty",
+           [](OpBuilderWithLoc &self, std::vector<Type> inTypes) -> Type {
+             std::vector<Type> outTypes{};
+             return self.getBuilder().getFunctionType(inTypes, outTypes);
+           })
 
       // builder locs
       .def("set_loc", [](OpBuilderWithLoc &self, Location loc) { self.setLastLoc(loc); })
@@ -303,8 +265,49 @@ void init_ffi_ir_builder(py::module_ &m) {
       .def("get_shifted_affine_map", 
         [](OpBuilderWithLoc &self, AffineMap map, int64_t shift) -> AffineMap { return self.getBuilder().getShiftedAffineMap(map, shift); })
       // frisk
-      .def("create_gemm",
-        [](OpBuilderWithLoc &self, Value &A, Value &B, Value &C) -> void { self.create<GemmOp>(A, B, C); });
+      .def("create_gemm_op",
+        [](OpBuilderWithLoc &self, Value &A, Value &B, Value &C) { return self.create<GemmOp>(A, B, C); })
+      .def("create_kernel_op", [](OpBuilderWithLoc &self, ModuleOp &module, std::string &KernelName, Type &KernelType) {
+        if (Operation *kernelOperation = module.lookupSymbol(KernelName))
+          return llvm::dyn_cast<KernelOp>(kernelOperation);
+        if (auto kernelTy = dyn_cast<FunctionType>(KernelType)) {
+          return self.create<KernelOp>(KernelName, kernelTy);
+        }
+        throw std::invalid_argument("invalid kernel function type");
+      })
+      .def("create_parallel_op", [](OpBuilderWithLoc &self, std::vector<int64_t> &gridSize, int64_t threadNum) {
+        auto builder = self.getBuilder();
+        Block *block = builder.getInsertionBlock();
+        if (block->getOperations().size() == 1) {
+          return self.create<ParallelOp>(gridSize, threadNum);
+        }
+        throw std::invalid_argument("invalid parallel create");
+      })
+      .def("create_block_op", 
+        [](OpBuilderWithLoc &self, std::vector<int64_t> &blockRange, py::function pyFunc) {
+          return self.create<BlockOp>(blockRange, [&](ValueRange args) -> void {
+            py::gil_scoped_acquire acquire;
+            try {
+              pyFunc(self, args);
+            } catch (const py::error_already_set &e) {
+              llvm::errs() << "Python exception in frisk block op: " << e.what() << "\n";
+              throw;
+            }
+          });
+        })
+      .def("create_for_op", 
+        [](OpBuilderWithLoc &self, int64_t lower, int64_t upper, int64_t step, py::function pyFunc) {
+          return self.create<ForOp>(lower, upper, step, [&](Value arg) -> void {
+            py::gil_scoped_acquire acquire;
+            try {
+              pyFunc(self, arg);
+            } catch (const py::error_already_set &e) {
+              llvm::errs() << "Python exception in frisk for op: " << e.what() << "\n";
+              throw;
+            }
+          });
+        });
+
 }
 
   // 其他dialect和IR构建所需函数与python绑定部分
@@ -329,9 +332,10 @@ void init_ffi_ir_common_op(py::module_ &m) {
              return str;
            })
       .def("push_back", [](ModuleOp &self, func::FuncOp &funcOp) -> void { self.push_back(funcOp); })
+      .def("push_back", [](ModuleOp &self, KernelOp &kernelOp) -> void { self.push_back(kernelOp); })
       .def("has_function",
            [](ModuleOp &self, std::string &funcName) -> bool {
-             if (self.lookupSymbol(funcName))
+             if (self.lookupSymbol<func::FuncOp>(funcName))
                return true;
              return false;
            })
@@ -339,6 +343,14 @@ void init_ffi_ir_common_op(py::module_ &m) {
            [](ModuleOp &self, std::string &funcName) -> func::FuncOp {
              return self.lookupSymbol<func::FuncOp>(funcName);
            })
+      .def("get_kernel",
+           [](ModuleOp &self, std::string &kernelName) -> KernelOp { return self.lookupSymbol<KernelOp>(kernelName); })
+      .def("erase_kernel",
+           [](ModuleOp &self, std::string &kernelName) -> void {
+            auto kernel = self.lookupSymbol<KernelOp>(kernelName);
+            assert(kernel->use_empty() && "KernelOp still has uses!");
+            kernel->erase();
+          })
       .def("get_int_attr",
            [](ModuleOp &self, std::string name) -> py::object {
              auto ret = self->getAttrOfType<IntegerAttr>(name);
@@ -776,7 +788,48 @@ void init_ffi_ir_common(py::module_ &m) {
       .def("get_type", &Value::getType)
       .def("id", [](Value &self) { return (uint64_t)self.getImpl(); })
       .def("__eq__", &Value::operator==)
-      .def("__hash__", [](Value &self) -> unsigned { return hash_value(self); });
+      .def("__hash__", [](Value &self) -> unsigned { return hash_value(self); })
+      .def("__repr__", [](mlir::Value self) {
+          return "Value(" + std::to_string(reinterpret_cast<uintptr_t>(self.getAsOpaquePointer())) + ")";
+        })
+      .def("__str__", [](mlir::Value self) {
+          std::string str;
+          llvm::raw_string_ostream os(str);
+          self.printAsOperand(os, mlir::OpPrintingFlags());
+          return os.str();
+        });
+  
+  py::class_<ValueRange>(m, "value_range", py::module_local())
+      .def(py::init<>())
+      .def(py::init<mlir::Value>())
+      .def(py::init<const std::vector<mlir::Value> &>())
+      .def("empty", &mlir::ValueRange::empty)
+      .def("size", &mlir::ValueRange::size)
+      .def("__len__", &mlir::ValueRange::size)
+      .def("__getitem__", [](const mlir::ValueRange &self, size_t index) {
+          if (index >= self.size()) { throw py::index_error("ValueRange index out of range"); }
+          return self[index];
+        }, py::return_value_policy::reference_internal)
+      .def("__iter__", 
+        [](const mlir::ValueRange &self) { return py::make_iterator(self.begin(), self.end()); }, py::keep_alive<0, 1>())
+      .def("to_vector", 
+        [](const mlir::ValueRange &self) { return std::vector<mlir::Value>(self.begin(), self.end()); })
+      .def("__eq__", [](const mlir::ValueRange &self, const mlir::ValueRange &other) { return self == other; })
+      .def("__ne__", [](const mlir::ValueRange &self, const mlir::ValueRange &other) { return self != other; })
+      .def("__repr__", [](const mlir::ValueRange &self) {
+          std::string repr = "ValueRange([";
+          for (size_t i = 0; i < self.size(); ++i) {
+            if (i > 0) repr += ", ";
+            repr += "Value(" + std::to_string(reinterpret_cast<uintptr_t>(self[i].getAsOpaquePointer())) + ")";
+          }
+          repr += "])";
+          return repr;
+        })
+
+      .def("__str__", [](const mlir::ValueRange &self) {
+          return "ValueRange(size=" + std::to_string(self.size()) + ")";
+        });
+      
 
   py::class_<OpResult, Value>(m, "op_result", py::module_local());
 
