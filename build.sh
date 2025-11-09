@@ -11,7 +11,7 @@ cmake  .. -GNinja \
   -DCMAKE_BUILD_TYPE=Debug  \
   -DCMAKE_LINKER=lld  \
   -DLLVM_ENABLE_ASSERTIONS=ON  \
-  -DMLIR_DIR=/home/xiebaokang/software/install/rocm-llvm-install/lib/cmake/mlir
+  -DMLIR_DIR=/home/baopeihua/mlir-tutorial/rocm-llvm-install/lib/cmake/mlir
 ninja -j32
 
 so_files=(*.so)
