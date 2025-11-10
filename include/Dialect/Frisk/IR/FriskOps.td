@@ -2,6 +2,7 @@
 #define FRISK_OPS
 
 include "Dialect/Frisk/IR/FriskDialect.td"
+// include "Dialect/Frisk/IR/FriskEnums.td"
 
 include "mlir/IR/OpBase.td"
 include "mlir/IR/BuiltinAttributeInterfaces.td"
@@ -68,9 +69,8 @@ def Frisk_KernelOp : Frisk_Op<"kernel", [ImplicitFriskTerminator]> {
     }
   }];
 
-  let hasCustomAssemblyFormat = 1;
-
   let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
 }
 
 // parallelOp
@@ -182,7 +182,7 @@ def Frisk_BlockOp : Frisk_Op<"block", [Pure, ImplicitFriskTerminator]> {
   let hasCustomAssemblyFormat = 1;
 }
 
-// for
+// forOp
 def Frisk_ForOp : Frisk_Op<"for", [Pure, ImplicitFriskTerminator]> {
   let summary = "for opeartion";
   let description = [{
@@ -262,32 +262,145 @@ def Frisk_GemmOp: Frisk_Op<"gemm", [Pure]> {
 
 // allocOp
 def Frisk_AllocBufferOp: Frisk_Op<"alloc_buffer", [Pure]> {
+  let summary = "allocate buffer operation";
+  let description = [{ 
+    Allocates a buffer with the specified shape, element type and optional attributes.
+  }];
 
+  let arguments = (ins 
+    DenseI64ArrayAttr:$shape,
+    TypeAttr:$elementType,
+    DefaultValuedAttr<I64Attr, "0">:$alignment,
+    DefaultValuedAttr<I64Attr, "0">:$memorySpace
+  );
+
+  let results = (outs 
+    Res<AnyMemRef>:$result
+  );
+
+  let builders = [
+    OpBuilder<(ins "ArrayRef<int64_t>":$shape, "Type":$elementType)>,
+    OpBuilder<(ins "ArrayRef<int64_t>":$shape, "Type":$elementType, "int64_t":$alignment)>,
+    OpBuilder<(ins "ArrayRef<int64_t>":$shape, "Type":$elementType, "int64_t":$alignment, "int64_t":$memorySpace)>
+  ];
+
+  let extraClassDeclaration = [{
+    MemRefType getMemRefType() { 
+      return cast<MemRefType>(getResult().getType()); 
+    }
+    // ArrayRef<int64_t> getShape() { return getShapeAttr().asArrayRef(); }
+    // Type getElementType() { return getElementTypeAttr().getValue(); }
+    // int64_t getAlignment() { return getAlignmentAttr().getInt(); }
+    // int64_t getMemorySpace() { return getMemorySpaceAttr().getInt(); }
+    
+    // 根据 memorySpace 获取 scope
+    StringRef getScope() {
+      switch (getMemorySpace()) {
+        case 0: return "local";
+        case 1: return "global"; 
+        case 3: return "shared";
+        default: return "unknown";
+      }
+    }
+  }];
+
+  let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
 }
 
 // copyOp
-def Frisk_CopyOp: Frisk_Op<"copy", [Pure]> {
-  // let summary = "copy";
-  // let description = [{ 
-  //   copy
-  // }];
+def Frisk_CopyOp: Frisk_Op<"copy", [Pure, AttrSizedOperandSegments]> {
+  let summary = "copy";
+  let description = [{ 
+    copy
+  }];
 
-  // let arguments = (ins 
-  //   AnyRankedTensor:$src,
-  //   AnyRankedTensor:$dst
-  // );
+  let arguments = (ins 
+    Arg<AnyMemRef, "", [MemRead]>:$src,
+    Arg<AnyMemRef, "", [MemWrite]>:$dst,
+    AffineMapAttr:$srcMap,
+    AffineMapAttr:$dstMap,
+    Variadic<Index>:$srcIndices,
+    Variadic<Index>:$dstIndices,
+    DenseI64ArrayAttr:$srcExtents,
+    DenseI64ArrayAttr:$dstExtents
+  );
 
-  // let assemblyFormat = "$inputs attr-dict `:` functional-type(operands, results)";
+  let builders = [
+    OpBuilder<(ins "Value":$srcMemref, "Value":$dstMemref, 
+      "ValueRange":$srcIndices, "ValueRange":$dstIndices)>,
+
+    OpBuilder<(ins "Value":$srcMemref, "Value":$dstMemref, 
+      "AffineMap":$srcMap, "AffineMap":$dstMap,
+      "ValueRange":$srcIndices, "ValueRange":$dstIndices)>
+  ];
+
+  let extraClassDeclaration = [{
+    Value getSrcMemRef() { return getOperand(0); }
+    Value getDstMemRef() { return getOperand(1); }
+
+    MemRefType getSrcMemRefType() { 
+      return cast<MemRefType>(getSrcMemRef().getType()); 
+    }
+    MemRefType getDstMemRefType() { 
+      return cast<MemRefType>(getDstMemRef().getType()); 
+    }
+
+  }];
+
+  let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
 }
 
 // fillOp
 def Frisk_FillOp: Frisk_Op<"fill", [Pure]> {
+  let summary = "fill";
+  let description = [{ 
+    fill
+  }];
 
+  let arguments = (ins 
+    Arg<AnyMemRef, "", [MemWrite]>:$memref,
+    AnyAttr:$value
+  );
+
+  let extraClassDeclaration = [{
+    MemRefType getMemType() { return cast<MemRefType>(getMemref().getType()); }
+  }];
+
+  let hasVerifier = 1;
+  // let hasCustomAssemblyFormat = 1;
+  let assemblyFormat = "$memref attr-dict `:` type($memref)";
 }
 
 // reduceOp
 def Frisk_ReduceOp: Frisk_Op<"reduce", [Pure]> {
+  let summary = "reduce";
+  let description = [{ 
+    reduce
+  }];
 
+  let arguments = (ins 
+    Arg<AnyMemRef, "", [MemRead]>:$src,
+    Arg<AnyMemRef, "", [MemWrite]>:$dst,
+    StrAttr:$kind,
+    I64Attr:$dim,
+    BoolAttr:$clear
+  );
+
+  let builders = [
+    OpBuilder<(ins "Value":$src, "Value":$dst, 
+               "StringRef":$kind, "int64_t":$dim, "bool":$clear)>
+  ];
+
+  let extraClassDeclaration = [{
+    MemRefType getSrcType() { return cast<MemRefType>(getSrc().getType()); }
+    MemRefType getDstType() { return cast<MemRefType>(getDst().getType()); }
+  }];
+
+  let hasVerifier = 1;
+  // let hasCustomAssemblyFormat = 1;
+  let assemblyFormat = "$src `,` $dst attr-dict `:` type($src) `,` type($dst)";
 }
 
 #endif // FRISK_OPS

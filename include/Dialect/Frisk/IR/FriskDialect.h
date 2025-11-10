@@ -24,6 +24,8 @@
 
 #include "Dialect/Frisk/Utils/Utils.h"
 
+// #include "Dialect/Frisk/IR/FriskEnums.h.inc"
+
 #define GET_OP_CLASSES
 #include "Dialect/Frisk/IR/FriskOps.h.inc"
 

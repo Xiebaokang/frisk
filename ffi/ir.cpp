@@ -46,7 +46,6 @@ void init_ffi_ir_frisk(py::module_ &&m) {
       .def("get_matrix_B", &GemmOp::getMatrixB)
       .def("get_matrix_C", &GemmOp::getMatrixC)
       .def("get_all_matrix", &GemmOp::getAllMatrix);
-
   // kernel op
   py::class_<KernelOp, OpState>(m, "KernelOp", py::module_local())
       .def("arg", [](KernelOp &self, unsigned idx) -> BlockArgument {
@@ -57,7 +56,6 @@ void init_ffi_ir_frisk(py::module_ &&m) {
       .def("get_num_arguments", &KernelOp::getNumArguments)
       .def("add_entry_block", [](KernelOp &self) -> Block * { return self.addEntryBlock(); }, ret::reference)
       .def_property_readonly("type", &KernelOp::getFunctionType);
-  
   // parallel op
   py::class_<ParallelOp, OpState>(m, "ParallelOp", py::module_local())
       .def("get_ivs", [](ParallelOp &self) -> std::vector<BlockArgument> {
@@ -69,7 +67,6 @@ void init_ffi_ir_frisk(py::module_ &&m) {
       .def("get_thread_num", &ParallelOp::getThreadNum)
       .def("get_grid_dim", &ParallelOp::getGridDims)
       .def("add_entry_block", [](ParallelOp &self) -> Block * { return self.addEntryBlock(); }, ret::reference);
-  
   // block Op
   py::class_<BlockOp, OpState>(m, "BlockOp", py::module_local())
       .def("get_ivs", [](BlockOp &self) -> std::vector<BlockArgument> {
@@ -80,13 +77,45 @@ void init_ffi_ir_frisk(py::module_ &&m) {
       .def("get_block_ranges", &BlockOp::getBlockRanges)
       .def("get_iteration_num", &BlockOp::getIterationNum)
       .def("get_block_dim", &BlockOp::getBlockDim);
-
   // for Op
   py::class_<ForOp, OpState>(m, "ForOp", py::module_local())
       .def("get_induction_var", &ForOp::getInductionVar)
       .def("get_lower_bound", &ForOp::getLower)
       .def("get_upper_bound", &ForOp::getUpper)
       .def("get_step", &ForOp::getStep);
+  // alloc buffer op
+  py::class_<AllocBufferOp, OpState>(m, "AllocBufferOp", py::module_local())
+    .def("get_alignment", &AllocBufferOp::getAlignment)
+    .def("get_memroy_space", [](AllocBufferOp &self) {
+      auto memSpace = self.getMemorySpace();
+      return static_cast<MemorySpace>(memSpace);
+    })
+    .def("get_result", &AllocBufferOp::getResult)
+    .def("get_memref_ty", &AllocBufferOp::getMemRefType);
+  // copy op
+  py::class_<CopyOp, OpState>(m, "CopyOp", py::module_local())
+    .def("get_src_affine_map", &CopyOp::getSrcMap)
+    .def("get_dst_affine_map", &CopyOp::getDstMap)
+    .def("get_src_memref", &CopyOp::getSrcMemRef)
+    .def("get_dst_memref", &CopyOp::getDstMemRef)
+    .def("get_src_memref_ty", &CopyOp::getSrcMemRefType)
+    .def("get_dst_memref_ty", &CopyOp::getDstMemRefType)
+    .def("get_src_indices", [](CopyOp &self) -> ValueRange { return self.getSrcIndices(); })
+    .def("get_dst_indices", [](CopyOp &self) -> ValueRange { return self.getDstIndices(); })
+    .def("get_src_extents", [](CopyOp &self) -> std::vector<int64_t> { 
+      return std::vector<int64_t>(self.getSrcExtents()); 
+    })
+    .def("get_dst_extents", [](CopyOp &self) -> std::vector<int64_t> { 
+      return std::vector<int64_t>(self.getDstExtents()); 
+    });
+  // fill op
+  py::class_<FillOp, OpState>(m, "FillOp", py::module_local())
+    .def("get_memref", &FillOp::getMemref);
+  // reduce op
+  py::class_<ReduceOp, OpState>(m, "ReduceOp", py::module_local())
+    .def("get_src_memref", &ReduceOp::getSrc)
+    .def("get_dst_memref", &ReduceOp::getDst)
+    .def("get_reduce_dim", &ReduceOp::getDim);
 }
 
   // OpBuilder 构建器的与python绑定部分
@@ -120,6 +149,20 @@ void init_ffi_ir_builder(py::module_ &m) {
       .def("get_bool_attr", [](OpBuilderWithLoc &self, bool value) { return self.getBuilder().getBoolAttr(value); })
       .def("get_int32_attr",
            [](OpBuilderWithLoc &self, int32_t value) { return self.getBuilder().getI32IntegerAttr(value); })
+      .def("get_float_attr", [](OpBuilderWithLoc &self, float value, const std::string &dtype) { 
+            if (dtype == "e4m3fn") {
+              return FloatAttr::get(Float8E4M3FNType(), value);
+            } else if (dtype == "e5m2") {
+              return FloatAttr::get(Float8E5M2Type(), value);
+            } else if (dtype == "fp16") {
+              return FloatAttr::get(Float16Type(), value);
+            } else if (dtype == "fp32") {
+              return FloatAttr::get(Float32Type(), value);
+            } else if (dtype == "fp64") {
+              return FloatAttr::get(Float64Type(), value);
+            }
+            throw std::invalid_argument("invalid float type");
+          })
       // constant
       .def("get_int64",
            [](OpBuilderWithLoc &self, int64_t v) -> Value {
@@ -306,7 +349,71 @@ void init_ffi_ir_builder(py::module_ &m) {
               throw;
             }
           });
-        });
+        })
+      .def("create_alloc_buffer_op", 
+        [](OpBuilderWithLoc &self, std::vector<int64_t> shape, const std::string &dtype, MemorySpace space, int64_t alignment) {
+          MLIRContext *context = self.getBuilder().getContext();
+          if (dtype == "e4m3fn") {
+            return self.create<AllocBufferOp>(ArrayRef<int64_t>(shape), 
+                    Float8E4M3FNType::get(context), alignment, static_cast<int64_t>(space));
+          } else if (dtype == "e5m2") {
+            return self.create<AllocBufferOp>(ArrayRef<int64_t>(shape), 
+                    Float8E5M2Type::get(context), alignment, static_cast<int64_t>(space));
+          } else if (dtype == "fp16") {
+            return self.create<AllocBufferOp>(ArrayRef<int64_t>(shape), 
+                    Float16Type::get(context), alignment, static_cast<int64_t>(space));
+          } else if (dtype == "fp32") {
+            return self.create<AllocBufferOp>(ArrayRef<int64_t>(shape), 
+                    Float32Type::get(context), alignment, static_cast<int64_t>(space));
+          } else if (dtype == "fp64") {
+            return self.create<AllocBufferOp>(ArrayRef<int64_t>(shape), 
+                    Float64Type::get(context), alignment, static_cast<int64_t>(space));
+          } else {
+            throw std::invalid_argument("invalid float type");
+          }
+      }, py::arg("shape"), py::arg("dtype"), py::arg("alignment") = 0, py::arg("space") = MemorySpace::global)
+      .def("create_copy_op", 
+        [](OpBuilderWithLoc &self, 
+              Value src, Value dst, 
+              std::vector<Value> srcIndices, std::vector<Value> dstIndices, 
+              AffineMap srcMap, AffineMap dstMap, 
+              std::vector<int64_t> srcExtents, std::vector<int64_t> dstExtents) {
+          if (!srcMap && !dstMap && srcExtents.empty() && dstExtents.empty()) {
+            return self.create<CopyOp>(src, dst, ValueRange(srcIndices), ValueRange(dstIndices));
+          } else if (srcMap && dstMap && srcExtents.empty() && dstExtents.empty()) {
+            return self.create<CopyOp>(src, dst, srcMap, dstMap, ValueRange(srcIndices), ValueRange(dstIndices));
+          } else if (srcMap && dstMap && !srcExtents.empty() && !dstExtents.empty()) {
+            return self.create<CopyOp>(src, dst, srcMap, dstMap, 
+              ValueRange(srcIndices), ValueRange(dstIndices), ArrayRef(srcExtents), ArrayRef(dstExtents));
+          } else {
+            llvm::errs() << "copy op map error."<< "\n";
+            throw;
+          }
+      }, py::arg("src"), py::arg("dst"), 
+      py::arg("srcIndices"), py::arg("dstIndices"), 
+      py::arg("srcMap") = AffineMap(), py::arg("dstMap") = AffineMap(),
+      py::arg("srcExtents") = py::list(), py::arg("dstExtents") = py::list())
+      .def("create_fill_op", [](OpBuilderWithLoc &self, Value memref, float value, const std::string &dtype) {
+        FloatAttr attr;
+        MLIRContext *context = self.getBuilder().getContext();
+        if (dtype == "e4m3fn") {
+          attr = FloatAttr::get(Float8E4M3FNType::get(context), value);
+        } else if (dtype == "e5m2") {
+          attr =  FloatAttr::get(Float8E5M2Type::get(context), value);
+        } else if (dtype == "fp16") {
+          attr =  FloatAttr::get(Float16Type::get(context), value);
+        } else if (dtype == "fp32") {
+          attr =  FloatAttr::get(Float32Type::get(context), value);
+        } else if (dtype == "fp64") {
+          attr =  FloatAttr::get(Float64Type::get(context), value);
+        } else {
+          throw std::invalid_argument("invalid float type");
+        }
+        return self.create<FillOp>(memref, attr);
+      })
+      .def("create_reduce_op", [](OpBuilderWithLoc &self, Value src, Value dst, const std::string &kind, int64_t dim, bool clear) {
+        return self.create<ReduceOp>(src, dst, kind, dim, clear);
+      }, py::arg("src"), py::arg("dst"), py::arg("kind"), py::arg("dim"), py::arg("clear")=true);
 
 }
 

@@ -2,10 +2,10 @@ module {
   frisk.kernel @matmul(%arg0: memref<1024x1024xf32>, %arg1: memref<1024x1024xf32>, %arg2: memref<1024x1024xf32>) {
     frisk.parallel %by, %bx : ((8, 8), threads=128) {
       %cst_0 = arith.constant 0.0000000e+00 : f32
-      %0 = frisk.alloc_buffer(memref<128x32xf32>, scope = "shared")
+      %0 = frisk.alloc_buffer : memref<128x32xf32, 1>
       %1 = frisk.alloc_buffer(memref<32x128xf32>, scope = "shared")
       %2 = frisk.alloc_buffer(memref<128x128xf32>, scope = "local.fragment")
-      frisk.fill(%2, cst_0) : memref<128x128xf32>
+      frisk.fill %2, 0.0 : memref<128x128xf32>
       frisk.for %k = 0 to 1024 step = 32 {
         frisk.copy(%0, %arg0, [0, 0], [%by * 128, %k * 32]) : memref<128x32xf32>, memref<1024x1024xf32>
         frisk.copy(%1, %arg1, [0, 0], [%k * 32, %bx * 128]) : memref<32x128xf32>, memref<1024x1024xf32>
@@ -15,6 +15,8 @@ module {
     }
   }
 }
+frisk.copy %0[%by * 128, %k * 32], %arg0[0, 0] : memref<128x32xf32>, memref<1024x1024xf32>
+
 
 module {
   frisk.kernel @online_softmax(%arg0: memref<8192x8192xf16>, %arg1: memref<8192x8192xf16>) {
@@ -30,8 +32,9 @@ module {
       frisk.fill(%lse, %cst_1) : memref<1xf32>
       frisk.for %i = 0 to 8 {
         frisk.copy(%x, %arg0, [0], [%bx, i * 1024]) : memref<1024xf16>, memref<8192x8192xf16>
-        frisk.reduce(%max_x, %x, dim=0, clear=1, "max") : memref<1xf16>, memref<1024xf16>
-        frisk.block %j = 0 to 1024 {
+        frisk.reduce %max_x, %x
+         {dim=0, clear=1, kind="max"} : memref<1xf16>, memref<1024xf16>
+        frisk.block %j = 0 to 1024 {  exp_x[j] = exp2(x[i] * log2e - max_x[i] * log2e)
           %0 = affine.load %x[j] : memref<1024xf16>
           %1 = affine.load %max_x[0] : memref<1xf16>
           %2 = arith.mulf %0, %cst : f32

@@ -1,5 +1,9 @@
 set(MLIR_BINARY_DIR ${CMAKE_BINARY_DIR})
 
+# set(LLVM_TARGET_DEFINITIONS FriskEnums.td)
+# mlir_tablegen(FriskEnums.h.inc -gen-enum-decls)
+# mlir_tablegen(FriskEnums.cpp.inc -gen-enum-defs)
+
 set(LLVM_TARGET_DEFINITIONS FriskOps.td)
 mlir_tablegen(FriskOps.h.inc -gen-op-decls)
 mlir_tablegen(FriskOps.cpp.inc -gen-op-defs)
