@@ -1,0 +1,17 @@
+module {
+  frisk.kernel @test_gemm(memref<4096x4096xf16, 1>, memref<4096x4096xf16, 1>, memref<4096x4096xf16, 1>, memref<4096xf16, 1>) {
+    frisk.parallel (%arg4, %arg5) = (8, 8), threads = 128 {
+      %0 = frisk.alloc_buffer {scope = "shared", alignment = 1024} -> memref<128x32xf16, 3>
+      %1 = frisk.alloc_buffer {scope = "shared", alignment = 1024} -> memref<32x128xf16, 3>
+      %2 = frisk.alloc_buffer {scope = "local"} -> memref<128x128xf16>
+      frisk.for %arg6 = 0 to 128 {
+        frisk.fill %arg0 {value = 0.000000e+00 : f16} : memref<4096x4096xf16, 1>
+        frisk.reduce %arg0, %arg3 {clear = true, dim = 1 : i64, kind = "max"} : memref<4096x4096xf16, 1>, memref<4096xf16, 1>
+        frisk.copy %arg0[%arg6, %arg6], %arg1[%arg6, %arg6] {src_extents = [4096, 4096], dst_extents = [4096, 4096]}  : memref<4096x4096xf16, 1>, memref<4096x4096xf16, 1>
+        frisk.block (%arg7, %arg8) to (128, 128) {
+          frisk.gemm(%arg0, %arg1, %arg2) {K = 4096 : i64, M = 4096 : i64, N = 4096 : i64, clear_accum = false, policy = #frisk<gemm_warp_policy Square>, transA = false, transB = false} : memref<4096x4096xf16, 1>, memref<4096x4096xf16, 1>, memref<4096x4096xf16, 1>
+        }
+      }
+    }
+  }
+}

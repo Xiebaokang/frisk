@@ -2,9 +2,13 @@
 #define FRISK_OPS
 
 include "Dialect/Frisk/IR/FriskDialect.td"
-// include "Dialect/Frisk/IR/FriskEnums.td"
+include "Dialect/Frisk/IR/FriskEnums.td"
+include "Dialect/Frisk/IR/FriskAttributes.td"
+// include "Dialect/Frisk/IR/FriskInterfaces.td"
 
 include "mlir/IR/OpBase.td"
+// include "mlir/IR/AttrTypeBase.td"
+// include "mlir/IR/EnumAttr.td"
 include "mlir/IR/BuiltinAttributeInterfaces.td"
 include "mlir/IR/SymbolInterfaces.td" // SymbolUserOpInterface
 include "mlir/Interfaces/CallInterfaces.td" // CallOpInterface
@@ -244,17 +248,36 @@ def Frisk_GemmOp: Frisk_Op<"gemm", [Pure]> {
   let arguments = (ins
     AnyMemRef:$A,
     AnyMemRef:$B,
-    AnyMemRef:$C
+    AnyMemRef:$C,
+
+    BoolAttr:$transA,
+    BoolAttr:$transB,
+    I64Attr:$M,
+    I64Attr:$N,
+    I64Attr:$K,
+    GemmWarpPolicyAttr:$policy,
+    BoolAttr:$clear_accum
   );
 
+  let results = (outs);
+
   let extraClassDeclaration = [{
-    Value getMatrixA() { return getOperand(0); }
-    Value getMatrixB() { return getOperand(1); }
-    Value getMatrixC() { return getOperand(2); }
+    Value getMatrixA() { return getA(); }
+    Value getMatrixB() { return getB(); }
+    Value getMatrixC() { return getC(); }
     ValueRange getAllMatrix() {
-      return getOperation()->getOperands();
+      return ValueRange(getOperation()->getOperands());
     }
   }];
+
+  // let extraClassDeclaration = [{
+  //   Value getMatrixA() { return getOperand(0); }
+  //   Value getMatrixB() { return getOperand(1); }
+  //   Value getMatrixC() { return getOperand(2); }
+  //   ValueRange getAllMatrix() {
+  //     return getOperation()->getOperands();
+  //   }
+  // }];
 
   let hasVerifier = 1;
   let assemblyFormat = "`(` $A `,` $B `,` $C `)` attr-dict `:` type($A) `,` type($B) `,` type($C)";
@@ -271,7 +294,8 @@ def Frisk_AllocBufferOp: Frisk_Op<"alloc_buffer", [Pure]> {
     DenseI64ArrayAttr:$shape,
     TypeAttr:$elementType,
     DefaultValuedAttr<I64Attr, "0">:$alignment,
-    DefaultValuedAttr<I64Attr, "0">:$memorySpace
+    // DefaultValuedAttr<I64Attr, "0">:$memorySpace
+    DefaultValuedAttr<MemorySpaceAttr, "::mlir::frisk::attr::MemorySpace::Local">:$memorySpace
   );
 
   let results = (outs 
@@ -280,8 +304,9 @@ def Frisk_AllocBufferOp: Frisk_Op<"alloc_buffer", [Pure]> {
 
   let builders = [
     OpBuilder<(ins "ArrayRef<int64_t>":$shape, "Type":$elementType)>,
-    OpBuilder<(ins "ArrayRef<int64_t>":$shape, "Type":$elementType, "int64_t":$alignment)>,
-    OpBuilder<(ins "ArrayRef<int64_t>":$shape, "Type":$elementType, "int64_t":$alignment, "int64_t":$memorySpace)>
+    // OpBuilder<(ins "ArrayRef<int64_t>":$shape, "Type":$elementType, "int64_t":$alignment)>,
+    // OpBuilder<(ins "ArrayRef<int64_t>":$shape, "Type":$elementType, "int64_t":$alignment, "int64_t":$memorySpace)>
+    OpBuilder<(ins "ArrayRef<int64_t>":$shape, "Type":$elementType, "Attribute":$memorySpace)>
   ];
 
   let extraClassDeclaration = [{
@@ -296,10 +321,16 @@ def Frisk_AllocBufferOp: Frisk_Op<"alloc_buffer", [Pure]> {
     // 根据 memorySpace 获取 scope
     StringRef getScope() {
       switch (getMemorySpace()) {
-        case 0: return "local";
-        case 1: return "global"; 
-        case 3: return "shared";
-        default: return "unknown";
+        case ::mlir::frisk::attr::MemorySpace::Local:
+          return "local";
+        case ::mlir::frisk::attr::MemorySpace::Global:
+          return "global";
+        case ::mlir::frisk::attr::MemorySpace::Shared:
+          return "shared";
+        // case 0: return "local";
+        // case 1: return "global"; 
+        // case 3: return "shared";
+        // default: return "unknown";
       }
     }
   }];

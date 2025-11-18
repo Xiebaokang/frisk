@@ -14,4 +14,15 @@ mlir_tablegen(FriskDialect.h.inc -gen-dialect-decls)
 mlir_tablegen(FriskDialect.cpp.inc -gen-dialect-defs)
 add_mlir_doc(FriskDialect FriskDialect Frisk/ -gen-dialect-doc)
 
+set(LLVM_TARGET_DEFINITIONS FriskAttributes.td)
+mlir_tablegen(FriskAttributes.h.inc -gen-attrdef-decls -dialect=frisk)
+mlir_tablegen(FriskAttributes.cpp.inc -gen-attrdef-defs -dialect=frisk)
+
+# mlir_tablegen(FriskInterfaces.h.inc -gen-op-interface-decls)
+# mlir_tablegen(FriskInterfaces.cpp.inc -gen-op-interface-defs)
+
+set(LLVM_TARGET_DEFINITIONS FriskEnums.td)
+mlir_tablegen(FriskEnums.h.inc -gen-enum-decls -dialect=frisk)
+mlir_tablegen(FriskEnums.cpp.inc -gen-enum-defs -dialect=frisk)
+
 add_public_tablegen_target(FriskTableGen)

@@ -89,3 +89,9 @@ target_link_libraries(frisk_ffi PRIVATE
   FriskIR
 )
 install(TARGETS frisk_ffi LIBRARY DESTINATION ${PY_BUILD_CMAKE_MODULE_NAME} COMPONENT python_module)
+
+# target_include_directories(frisk_ffi PRIVATE
+#   "${PROJECT_BINARY_DIR}/include"
+# )
+# add_subdirectory(test)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/test_pass)

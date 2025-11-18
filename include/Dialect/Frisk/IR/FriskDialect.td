@@ -25,7 +25,7 @@ def Frisk_Dialect : Dialect {
     "::mlir::cf::ControlFlowDialect"
   ];
 
-  // let useDefaultAttributePrinterParser = 1;
+  let useDefaultAttributePrinterParser = 1;
 }
 
 #endif // FRISK_DIALECT

@@ -1,19 +1,30 @@
 #include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <optional>
+#include <stdexcept>
+#include <string>
 
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Verifier.h"
+#include "llvm/ADT/SmallVector.h"
+#include "mlir/IR/AffineExpr.h"
 
 // Dialect
+#include "Dialect/Frisk/IR/FriskAttributes.h"
+#include "Dialect/Frisk/IR/FriskEnums.h"
 #include "Dialect/Frisk/IR/FriskDialect.h"
+
 
 namespace py = pybind11;
 
 namespace mlir::frisk {
+
+using AttrMemorySpace = ::mlir::frisk::attr::MemorySpace;
+using GemmPolicy = ::mlir::frisk::attr::GemmWarpPolicy;
 
   // *** C++ 绑定 python  IR 创建部分 ***
 using ret = py::return_value_policy;
@@ -86,9 +97,9 @@ void init_ffi_ir_frisk(py::module_ &&m) {
   // alloc buffer op
   py::class_<AllocBufferOp, OpState>(m, "AllocBufferOp", py::module_local())
     .def("get_alignment", &AllocBufferOp::getAlignment)
-    .def("get_memroy_space", [](AllocBufferOp &self) {
+    .def("get_memroy_space", [](AllocBufferOp &self) -> AttrMemorySpace {
       auto memSpace = self.getMemorySpace();
-      return static_cast<MemorySpace>(memSpace);
+      return memSpace;
     })
     .def("get_result", &AllocBufferOp::getResult)
     .def("get_memref_ty", &AllocBufferOp::getMemRefType);
@@ -123,10 +134,10 @@ void init_ffi_ir_builder(py::module_ &m) {
   py::class_<OpBuilder::InsertPoint>(m, "InsertPoint", py::module_local());
 
   // memroy space
-  py::enum_<MemorySpace>(m, "MemorySpace", py::arithmetic())
-      .value("GLOBAL", MemorySpace::global)
-      .value("SHARED", MemorySpace::shared)
-      .value("LOCAL", MemorySpace::local)
+  py::enum_<AttrMemorySpace>(m, "MemorySpace", py::arithmetic())
+      .value("GLOBAL", AttrMemorySpace::Global)
+      .value("SHARED", AttrMemorySpace::Shared)
+      .value("LOCAL", AttrMemorySpace::Local)
       .export_values();
 
   // builder
@@ -237,12 +248,12 @@ void init_ffi_ir_builder(py::module_ &m) {
              return RankedTensorType::get(shape, elementType);
            })
       .def("get_memref_ty", 
-           [](OpBuilderWithLoc &self, Type &elementType, std::vector<int64_t> &shape, AffineMap map, MemorySpace space) -> Type {
+           [](OpBuilderWithLoc &self, Type &elementType, std::vector<int64_t> &shape, AffineMap map, AttrMemorySpace space) -> Type {
              if (!map) {
               return MemRefType::get(shape, elementType, {}, static_cast<unsigned>(space));
              }
              return MemRefType::get(shape, elementType, map, static_cast<unsigned>(space));
-           }, py::arg("elementType"), py::arg("shape"), py::arg("map") = AffineMap(), py::arg("space") = MemorySpace::global)
+           }, py::arg("elementType"), py::arg("shape"), py::arg("map") = AffineMap(), py::arg("space") = AttrMemorySpace::Global)
       .def("get_function_ty",
            [](OpBuilderWithLoc &self, std::vector<Type> inTypes, std::vector<Type> outTypes) -> Type {
              return self.getBuilder().getFunctionType(inTypes, outTypes);
@@ -309,7 +320,50 @@ void init_ffi_ir_builder(py::module_ &m) {
         [](OpBuilderWithLoc &self, AffineMap map, int64_t shift) -> AffineMap { return self.getBuilder().getShiftedAffineMap(map, shift); })
       // frisk
       .def("create_gemm_op",
-        [](OpBuilderWithLoc &self, Value &A, Value &B, Value &C) { return self.create<GemmOp>(A, B, C); })
+        [](OpBuilderWithLoc &self, Value &A, Value &B, Value &C,
+           bool transA, bool transB, bool clearAccum) {
+          auto &builder = self.getBuilder();
+
+          auto requireMemRef = [](Value &val, const char *name) -> MemRefType {
+            if (auto type = dyn_cast<MemRefType>(val.getType()))
+              return type;
+            throw std::invalid_argument(std::string("create_gemm_op expects memref for operand ") + name);
+          };
+
+          auto requireStaticDim = [](int64_t dim, const char *desc) -> uint64_t {
+            if (dim < 0)
+              throw std::invalid_argument(std::string("create_gemm_op requires static ") + desc);
+            return static_cast<uint64_t>(dim);
+          };
+
+          MemRefType aType = requireMemRef(A, "A");
+          MemRefType bType = requireMemRef(B, "B");
+          MemRefType cType = requireMemRef(C, "C");
+
+          if (aType.getRank() != 2 || bType.getRank() != 2 || cType.getRank() != 2)
+            throw std::invalid_argument("create_gemm_op expects rank-2 memrefs");
+
+          uint64_t m = requireStaticDim(aType.getDimSize(0), "M dimension of A");
+          uint64_t k = requireStaticDim(aType.getDimSize(1), "K dimension of A");
+          uint64_t kFromB = requireStaticDim(bType.getDimSize(0), "K dimension of B");
+          if (k != kFromB)
+            throw std::invalid_argument("create_gemm_op expects A and B inner dimensions to match");
+          uint64_t n = requireStaticDim(bType.getDimSize(1), "N dimension of B");
+          uint64_t cM = requireStaticDim(cType.getDimSize(0), "M dimension of C");
+          uint64_t cN = requireStaticDim(cType.getDimSize(1), "N dimension of C");
+          if (m != cM || n != cN)
+            throw std::invalid_argument("create_gemm_op expects C shape to match A/B product");
+
+          auto elementType = aType.getElementType();
+          if (elementType != bType.getElementType() || elementType != cType.getElementType())
+            throw std::invalid_argument("create_gemm_op expects operands to have matching element types");
+
+          auto policy = GemmPolicy::Square;
+          return self.create<GemmOp>(A, B, C, transA, transB, m, n, k, policy, clearAccum);
+        },
+        py::arg("A"), py::arg("B"), py::arg("C"),
+        py::arg("transA") = false, py::arg("transB") = false,
+        py::arg("clear_accum") = false)
       .def("create_kernel_op", [](OpBuilderWithLoc &self, ModuleOp &module, std::string &KernelName, Type &KernelType) {
         if (Operation *kernelOperation = module.lookupSymbol(KernelName))
           return llvm::dyn_cast<KernelOp>(kernelOperation);
@@ -351,27 +405,28 @@ void init_ffi_ir_builder(py::module_ &m) {
           });
         })
       .def("create_alloc_buffer_op", 
-        [](OpBuilderWithLoc &self, std::vector<int64_t> shape, const std::string &dtype, MemorySpace space, int64_t alignment) {
+        [](OpBuilderWithLoc &self, std::vector<int64_t> shape, const std::string &dtype, AttrMemorySpace space, int64_t alignment) {
           MLIRContext *context = self.getBuilder().getContext();
+          Type elementType;
           if (dtype == "e4m3fn") {
-            return self.create<AllocBufferOp>(ArrayRef<int64_t>(shape), 
-                    Float8E4M3FNType::get(context), alignment, static_cast<int64_t>(space));
+            elementType = Float8E4M3FNType::get(context);
           } else if (dtype == "e5m2") {
-            return self.create<AllocBufferOp>(ArrayRef<int64_t>(shape), 
-                    Float8E5M2Type::get(context), alignment, static_cast<int64_t>(space));
+            elementType = Float8E5M2Type::get(context);
           } else if (dtype == "fp16") {
-            return self.create<AllocBufferOp>(ArrayRef<int64_t>(shape), 
-                    Float16Type::get(context), alignment, static_cast<int64_t>(space));
+            elementType = Float16Type::get(context);
           } else if (dtype == "fp32") {
-            return self.create<AllocBufferOp>(ArrayRef<int64_t>(shape), 
-                    Float32Type::get(context), alignment, static_cast<int64_t>(space));
+            elementType = Float32Type::get(context);
           } else if (dtype == "fp64") {
-            return self.create<AllocBufferOp>(ArrayRef<int64_t>(shape), 
-                    Float64Type::get(context), alignment, static_cast<int64_t>(space));
+            elementType = Float64Type::get(context);
           } else {
             throw std::invalid_argument("invalid float type");
           }
-      }, py::arg("shape"), py::arg("dtype"), py::arg("alignment") = 0, py::arg("space") = MemorySpace::global)
+          if (alignment < 0)
+            throw std::invalid_argument("alignment must be non-negative");
+          auto resultType = MemRefType::get(shape, elementType, AffineMap(), static_cast<unsigned>(space));
+          return self.create<AllocBufferOp>(resultType, ArrayRef<int64_t>(shape), elementType,
+                                            static_cast<uint64_t>(alignment), space);
+      }, py::arg("shape"), py::arg("dtype"), py::arg("space") = AttrMemorySpace::Global, py::arg("alignment") = 0)
       .def("create_copy_op", 
         [](OpBuilderWithLoc &self, 
               Value src, Value dst, 
@@ -620,7 +675,11 @@ void init_ffi_ir_affine_expr_map(py::module_ &m) {
       })
     .def_static("get_permutation_map", 
       [](std::vector<int64_t> permutation, MLIRContext *context) -> AffineMap { 
-        return AffineMap::getPermutationMap(ArrayRef<int64_t>(permutation), context); 
+        llvm::SmallVector<unsigned, 4> unsignedPermutation;
+        unsignedPermutation.reserve(permutation.size());
+        for (int64_t value : permutation)
+          unsignedPermutation.push_back(static_cast<unsigned>(value));
+        return AffineMap::getPermutationMap(ArrayRef<unsigned>(unsignedPermutation), context); 
       })
     .def_static("get_multi_dim_map_with_targets", 
       [](unsigned numDims, MLIRContext *context) -> AffineMap { return AffineMap::getMultiDimIdentityMap(numDims, context); })
@@ -759,26 +818,35 @@ void init_ffi_ir_affine_expr_map(py::module_ &m) {
     .def("compose", &AffineExpr::compose)
     // dyn_cast
     .def("as_binary", [](AffineExpr &self) -> py::object {
-      if (auto binary = dyn_cast<AffineBinaryOpExpr>(self)) {
-        return py::cast(binary);
+      auto kind = self.getKind();
+      if (kind <= AffineExprKind::LAST_AFFINE_BINARY_OP) {
+        auto *impl = const_cast<AffineExpr::ImplType *>(
+            static_cast<const AffineExpr::ImplType *>(self.getAsOpaquePointer()));
+        return py::cast(AffineBinaryOpExpr(impl));
       }
       return py::none();
     })
     .def("as_dim", [](AffineExpr &self) -> py::object {
-      if (auto dim = dyn_cast<AffineDimExpr>(self)) {
-        return py::cast(dim);
+      if (self.getKind() == AffineExprKind::DimId) {
+        auto *impl = const_cast<AffineExpr::ImplType *>(
+            static_cast<const AffineExpr::ImplType *>(self.getAsOpaquePointer()));
+        return py::cast(AffineDimExpr(impl));
       }
       return py::none();
     })
     .def("as_symbol", [](AffineExpr &self) -> py::object {
-      if (auto symbol = dyn_cast<AffineSymbolExpr>(self)) {
-        return py::cast(symbol);
+      if (self.getKind() == AffineExprKind::SymbolId) {
+        auto *impl = const_cast<AffineExpr::ImplType *>(
+            static_cast<const AffineExpr::ImplType *>(self.getAsOpaquePointer()));
+        return py::cast(AffineSymbolExpr(impl));
       }
       return py::none();
     })
     .def("as_constant", [](AffineExpr &self) -> py::object {
-      if (auto constant = dyn_cast<AffineConstantExpr>(self)) {
-        return py::cast(constant);
+      if (self.getKind() == AffineExprKind::Constant) {
+        auto *impl = const_cast<AffineExpr::ImplType *>(
+            static_cast<const AffineExpr::ImplType *>(self.getAsOpaquePointer()));
+        return py::cast(AffineConstantExpr(impl));
       }
       return py::none();
     });
@@ -810,8 +878,6 @@ void init_ffi_ir_affine_expr_map(py::module_ &m) {
   m.def("get_affine_expr_from_flat_form", &getAffineExprFromFlatForm);
   // 表达式简化
   m.def("simplify_affine_expr", &simplifyAffineExpr);
-  // 边界分析
-  m.def("get_bound_for_affine_expr", &getBoundForAffineExpr);
 }
 
 void init_ffi_ir_common(py::module_ &m) {
@@ -855,12 +921,13 @@ void init_ffi_ir_common(py::module_ &m) {
       .def("get_elem_width", &MemRefType::getElementTypeBitWidth)
       .def("get_shape", [](MemRefType &self) -> std::vector<int64_t> { return self.getShape(); })
       .def("get_element_ty", &MemRefType::getElementType)
-      .def("get_memory_space", [](MemRefType &self) -> std::optional<MemorySpace> {
+      .def("get_memory_space", [](MemRefType &self) -> std::optional<AttrMemorySpace> {
         if (auto spaceAttr = dyn_cast<IntegerAttr>(self.getMemorySpace())) {
-          int64_t spaceValue = spaceAttr.getInt();
-          return std::optional<MemorySpace>{static_cast<MemorySpace>(spaceValue)};
+          auto spaceValue = static_cast<uint32_t>(spaceAttr.getInt());
+          if (auto symbolized = ::mlir::frisk::attr::symbolizeMemorySpace(spaceValue))
+            return symbolized;
         }
-        return std::optional<MemorySpace>{};
+        return std::nullopt;
       })
       .def("get_layout_map", [](MemRefType &self) -> AffineMap {
         auto layout = self.getLayout();

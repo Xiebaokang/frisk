@@ -21,6 +21,7 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
 #include "Dialect/Frisk/IR/FriskDialect.h.inc"
+#include "Dialect/Frisk/IR/FriskAttributes.h"
 
 #include "Dialect/Frisk/Utils/Utils.h"
 

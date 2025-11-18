@@ -6,17 +6,13 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Verifier.h"
+#include "Dialect/Frisk/IR/FriskAttributes.h"
 
 namespace mlir::frisk {
 
 namespace {
 
-enum class MemorySpace {
-  global = 1,
-  shared = 3,
-  // local = 5,
-  local = 0,
-};
+using MemorySpace = ::mlir::frisk::attr::MemorySpace;
 
 class OpBuilderWithLoc {   // 封装了 OpBuilder IR 构建器
 public:

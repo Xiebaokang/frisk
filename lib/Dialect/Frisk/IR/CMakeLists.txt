@@ -1,4 +1,6 @@
 add_frisk_library(FriskIR
+  FriskAttributes.cpp
+  FriskEnums.cpp
   FriskOps.cpp
 
   DEPENDS

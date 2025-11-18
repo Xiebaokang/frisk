@@ -7,6 +7,8 @@
 #include "mlir/Interfaces/FunctionInterfaces.h"
 
 #include "Dialect/Frisk/IR/FriskDialect.h"
+#include "Dialect/Frisk/IR/FriskAttributes.h"
+// #include "Dialect/Frisk/IR/FriskInterfaces.h"
 
 // #include "Dialect/Frisk/IR/FriskEnums.cpp.inc"
 #define GET_OP_CLASSES
@@ -16,13 +18,6 @@
 #include "Dialect/Frisk/IR/FriskDialect.cpp.inc"
 namespace mlir {
 namespace frisk {
-
-void FriskDialect::initialize() {
-  addOperations<
-#define GET_OP_LIST
-#include "Dialect/Frisk/IR/FriskOps.cpp.inc"
-      >();
-}
 
 } // namespace frisk
 } // namespace mlir
@@ -369,33 +364,105 @@ LogicalResult GemmOp::verify() {
   return success();
 }
 
+// LogicalResult GemmOp::inferLayout(OpBuilder &builder, DenseMap<Value, Attribute> &LayoutMap) {
+//   Operation *op = this->getOperation();
+
+//   Value A = getA(), B = getB(), C = getC();
+//   bool transA = getTransA(), transB = getTransB();
+//   int64_t M = getM(), N = getN(), K = getK();
+//   auto policy = getPolicy();
+
+//   // auto target = frisk::getTargetFromOp(op);
+//   // int blockSize = frisk::getBlockSizeFrom(op);
+//   if(!target || blockSize <= 0){
+//     return op->emitError("Failed to get target or block size could not infer layout");
+//   }
+
+//   frisk::GemmInst gemmInst = frisk::GetGemmInst(op, blockSize, target);
+//   auto [warpM, warpN] = frisk::ComputeWarpPartition(policy, M, N, blockSize, target, gemnInst);
+
+//   Attribute layoutA, layoutB, fragC;
+//   int elementSize = A.getType().cast<MemRefType>().getElementTypeBitWidth();
+//   auto ctx = builder.getContext();
+
+//   if(frisk::TargetIsHopper(target)){
+//     auto shapeA = /* */;
+//     auto fwdIndexA = /* */;
+//     layoutA = LayoutAttr::get(ctx, shapeA, fwdIndexA, nullptr, nullptr);
+
+//     auto shapeB = /* */;
+//     auto fwdIndexB = /* */;
+//     layoutB = LayoutAttr::get(ctx, shapeB, fwdIndexB, nullptr, nullptr);
+
+//     auto shapeC = /* */;
+//     auto fwdIndexC = /* */;
+//     auto fwdThreadC = /* */;
+//     auto repSizeC = /* */;
+//     layoutC = LayoutAttr::get(ctx, shapeC, fwdIndexC, fwdThreadC, repSizeC);
+//   }else if{
+
+//   }else{
+
+//   }
+
+//   if(!layoutA || !layoutB || !fragC){
+//     return op->emitError("Failed to infer layout attributes for current config");
+//   }
+
+//   bool updated = false;
+//   auto itA = LayoutMap.find(A);
+//   if(itA == LayoutMap.end()){
+//     layoutMap[A] = layoutA;
+//     updated = true;
+//   }else{
+//     //检查兼容性，合并或报错
+//   }
+
+//   auto itB = LayoutMap.find(B);
+//   if(itB == LayoutMap.end()){
+//     layoutMap[B] = layoutB;
+//     updated = true;
+//   }else{
+//     //检查兼容性，合并或报错
+//   }
+
+//   auto itC = LayoutMap.find(C);
+//   if(itC == LayoutMap.end()){
+//     layoutMap[getC()] = layoutC;
+//     updated = true;
+//   }else{
+//     //检查兼容性，合并或报错
+//   }
+
+//   return success(updated);
+// }
 //===----------------------------------------------------------------------===//
 // -- AllocBufferOp --
 //===----------------------------------------------------------------------===//
-void AllocBufferOp::build(OpBuilder &builder, OperationState &state,
-                          ArrayRef<int64_t> shape, Type elementType) {
-  build(builder, state, shape, elementType, /*alignment=*/0, /*memorySpace=*/0);
-}
+// void AllocBufferOp::build(OpBuilder &builder, OperationState &state,
+//                           ArrayRef<int64_t> shape, Type elementType) {
+//   build(builder, state, shape, elementType, /*alignment=*/0, /*memorySpace=*/0);
+// }
 
-void AllocBufferOp::build(OpBuilder &builder, OperationState &state,
-                          ArrayRef<int64_t> shape, Type elementType, 
-                          int64_t alignment) {
-  build(builder, state, shape, elementType, alignment, /*memorySpace=*/0);
-}
+// void AllocBufferOp::build(OpBuilder &builder, OperationState &state,
+//                           ArrayRef<int64_t> shape, Type elementType, 
+//                           int64_t alignment) {
+//   build(builder, state, shape, elementType, alignment, /*memorySpace=*/0);
+// }
 
-void AllocBufferOp::build(OpBuilder &builder, OperationState &state,
-                          ArrayRef<int64_t> shape, Type elementType,
-                          int64_t alignment, int64_t memorySpace) {
-  // 创建 memref 类型
-  auto memrefType = MemRefType::get(shape, elementType, /*layout=*/{}, memorySpace);
-  // 添加属性
-  state.addAttribute("shape", builder.getDenseI64ArrayAttr(shape));
-  state.addAttribute("elementType", TypeAttr::get(elementType));
-  state.addAttribute("alignment", builder.getI64IntegerAttr(alignment));
-  state.addAttribute("memorySpace", builder.getI64IntegerAttr(memorySpace));
-  // 添加结果类型
-  state.addTypes(memrefType);
-}
+// void AllocBufferOp::build(OpBuilder &builder, OperationState &state,
+//                           ArrayRef<int64_t> shape, Type elementType,
+//                           int64_t alignment, int64_t memorySpace) {
+//   // 创建 memref 类型
+//   auto memrefType = MemRefType::get(shape, elementType, /*layout=*/{}, memorySpace);
+//   // 添加属性
+//   state.addAttribute("shape", builder.getDenseI64ArrayAttr(shape));
+//   state.addAttribute("elementType", TypeAttr::get(elementType));
+//   state.addAttribute("alignment", builder.getI64IntegerAttr(alignment));
+//   state.addAttribute("memorySpace", builder.getI64IntegerAttr(memorySpace));
+//   // 添加结果类型
+//   state.addTypes(memrefType);
+// }
 
 LogicalResult AllocBufferOp::verify() {
   auto resultType = getResult().getType();
@@ -417,7 +484,8 @@ LogicalResult AllocBufferOp::verify() {
     return emitOpError("elementType attribute must match result memref element type");
   }
 
-  if (memrefType.getMemorySpaceAsInt() != attrMemorySpace) {
+  unsigned resultMemorySpace = memrefType.getMemorySpaceAsInt();
+  if (resultMemorySpace != static_cast<unsigned>(attrMemorySpace)) {
     return emitOpError("memorySpace attribute must match result memref memory space");
   }
   // 检查对齐值是否有效
@@ -430,9 +498,15 @@ LogicalResult AllocBufferOp::verify() {
     return emitOpError("alignment must be a power of 2");
   }
   // 检查 memorySpace 是否有效
-  int64_t memorySpace = getMemorySpace();
-  if (memorySpace != 0 && memorySpace != 1 && memorySpace != 3) {
-    return emitOpError("memorySpace must be 0 (local), 1 (global), or 3 (shared)");
+  switch (attrMemorySpace) {
+    case ::mlir::frisk::attr::MemorySpace::Local:
+      break;
+    case ::mlir::frisk::attr::MemorySpace::Global:
+      break;
+    case ::mlir::frisk::attr::MemorySpace::Shared:
+      break;
+    default:
+      return emitOpError("memorySpace must be Local, Global, or Shared");
   }
   return success();
 }
@@ -476,13 +550,21 @@ ParseResult AllocBufferOp::parse(OpAsmParser &parser, OperationState &result) {
 void AllocBufferOp::print(OpAsmPrinter &p) {
   // 打印属性字典
   p << " {";
-  int64_t memorySpace = getMemorySpace();
+  auto memorySpace = getMemorySpace();
   p << "scope = \"";
   switch (memorySpace) {
-    case 0: p << "local"; break;
-    case 1: p << "global"; break;
-    case 3: p << "shared"; break;
-    default: p << "unknown"; break;
+    case ::mlir::frisk::attr::MemorySpace::Local:
+      p << "local";
+      break;
+    case ::mlir::frisk::attr::MemorySpace::Global:
+      p << "global";
+      break;
+    case ::mlir::frisk::attr::MemorySpace::Shared:
+      p << "shared";
+      break;
+    default:
+      p << "unknown";
+      break;
   }
   p << "\"";
   // 打印 alignment（如果不是默认值）
