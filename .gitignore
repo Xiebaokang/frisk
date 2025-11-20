@@ -6,3 +6,5 @@ __pycache__/
 *.pyc
 build.sh
 rebuild.sh
+AGENTS.md
+GEMM_LAYOUT_PLAN.md

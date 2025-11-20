@@ -1,13 +1,22 @@
+#include <algorithm>
+#include <array>
+#include <limits>
 #include <vector>
+#include <optional>
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/ADT/StringRef.h"
+#include "mlir/IR/AffineExpr.h"
+#include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Attributes.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Interfaces/FunctionImplementation.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 
 #include "Dialect/Frisk/IR/FriskDialect.h"
 #include "Dialect/Frisk/IR/FriskAttributes.h"
+#include "Dialect/Frisk/IR/FriskEnums.h"
 // #include "Dialect/Frisk/IR/FriskInterfaces.h"
 
 // #include "Dialect/Frisk/IR/FriskEnums.cpp.inc"
@@ -24,6 +33,205 @@ namespace frisk {
 
 namespace mlir {
 namespace frisk {
+
+namespace {
+
+struct TargetInfo {
+  bool isCuda = false;
+  bool isCDNA = false;
+  unsigned smVersion = 0;
+  unsigned warpSize = 32;
+  StringRef rawName;
+};
+
+static std::optional<TargetInfo> detectTargetInfo(Operation *op) {
+  Operation *cur = op;
+  while (cur) {
+    if (auto attr = cur->getAttrOfType<StringAttr>("frisk.target")) {
+      TargetInfo info;
+      info.rawName = attr.getValue();
+      StringRef value = info.rawName;
+      if (value.consume_front("sm_") || value.consume_front("sm")) {
+        info.isCuda = true;
+        unsigned parsed = 0;
+        if (!value.getAsInteger(/*Radix=*/10, parsed)) {
+          info.smVersion = parsed;
+          info.warpSize = 32;
+        }
+        return info;
+      }
+      if (value.consume_front("gfx")) {
+        info.isCDNA = value.consume_front("9");
+        info.warpSize = info.isCDNA ? 64 : 32;
+        return info;
+      }
+      // Fallthrough—treat unknown string as CUDA-like for now.
+      info.isCuda = true;
+      info.warpSize = 32;
+      return info;
+    }
+    cur = cur->getParentOp();
+  }
+  return std::nullopt;
+}
+
+static std::optional<int64_t> inferThreadBlockSize(Operation *op) {
+  Operation *cur = op;
+  while (cur) {
+    if (auto attr = cur->getAttrOfType<IntegerAttr>("frisk.threads"))
+      return attr.getInt();
+    if (auto parallel = dyn_cast<ParallelOp>(cur))
+      return parallel.getThreads();
+    cur = cur->getParentOp();
+  }
+  return std::nullopt;
+}
+
+static FailureOr<std::array<int64_t, 2>> extractMatrixShape(MemRefType type) {
+  if (type.getRank() < 2)
+    return failure();
+  int64_t rows = type.getDimSize(type.getRank() - 2);
+  int64_t cols = type.getDimSize(type.getRank() - 1);
+  if (rows < 0 || cols < 0)
+    return failure();
+  return std::array<int64_t, 2>{rows, cols};
+}
+
+static DenseI64ArrayAttr buildShapeAttr(OpBuilder &builder,
+                                        ArrayRef<int64_t> dims) {
+  return builder.getDenseI64ArrayAttr(dims);
+}
+
+static LayoutAttr buildLinearLayoutAttr(OpBuilder &builder,
+                                        ArrayRef<int64_t> dims, int64_t stride,
+                                        bool transpose) {
+  assert(dims.size() == 2 && "expect 2-D layout");
+  int64_t rows = dims[0];
+  int64_t cols = dims[1];
+  if (transpose)
+    std::swap(rows, cols);
+  DenseI64ArrayAttr shapeAttr = buildShapeAttr(builder, {rows, cols});
+
+  MLIRContext *ctx = builder.getContext();
+  AffineExpr row = builder.getAffineDimExpr(0);
+  AffineExpr col = builder.getAffineDimExpr(1);
+  AffineExpr expr = row * builder.getAffineConstantExpr(stride) + col;
+  auto indexMap = AffineMapAttr::get(AffineMap::get(2, 0, expr, ctx));
+
+  return LayoutAttr::get(ctx, shapeAttr, indexMap, AffineMapAttr(),
+                         IntegerAttr());
+}
+
+static LayoutAttr buildSharedLayoutForType(OpBuilder &builder, MemRefType type,
+                                           bool transpose) {
+  auto maybeShape = extractMatrixShape(type);
+  if (failed(maybeShape))
+    return LayoutAttr();
+  auto dims = *maybeShape;
+  int64_t elementBits = type.getElementTypeBitWidth();
+  int64_t cols = transpose ? dims[0] : dims[1];
+  int64_t padded = cols;
+  if (elementBits > 0 && (elementBits * cols) % 256 == 0)
+    padded += 128 / elementBits;
+  return buildLinearLayoutAttr(builder, {dims[0], dims[1]}, padded, transpose);
+}
+
+static LayoutAttr buildFragmentLayoutAttr(OpBuilder &builder,
+                                          MemRefType type,
+                                          int64_t tileRows, int64_t tileCols,
+                                          unsigned warpSize) {
+  auto maybeShape = extractMatrixShape(type);
+  if (failed(maybeShape))
+    return LayoutAttr();
+  auto dims = *maybeShape;
+  DenseI64ArrayAttr shapeAttr = buildShapeAttr(builder, {dims[0], dims[1]});
+  MLIRContext *ctx = builder.getContext();
+
+  AffineExpr row = builder.getAffineDimExpr(0);
+  AffineExpr col = builder.getAffineDimExpr(1);
+  AffineExpr index =
+      row * builder.getAffineConstantExpr(dims[1]) + col;
+  auto indexMap = AffineMapAttr::get(AffineMap::get(2, 0, index, ctx));
+
+  int64_t laneM = std::max<int64_t>(1, std::min<int64_t>(tileRows, 16));
+  int64_t laneN = std::max<int64_t>(1, std::min<int64_t>(tileCols, 8));
+  // Clamp to warp size to avoid producing values outside of lane bounds.
+  if (laneM * laneN > static_cast<int64_t>(warpSize)) {
+    laneN = std::max<int64_t>(1, warpSize / laneM);
+  }
+  AffineExpr lane =
+      (row % laneM) * builder.getAffineConstantExpr(laneN) + (col % laneN);
+  auto threadMap = AffineMapAttr::get(AffineMap::get(2, 0, lane, ctx));
+  auto replicate = builder.getI64IntegerAttr(1);
+  return LayoutAttr::get(ctx, shapeAttr, indexMap, threadMap, replicate);
+}
+
+static std::pair<int64_t, int64_t>
+computeWarpPartition(attr::GemmWarpPolicy policy, int64_t M, int64_t N,
+                     int64_t blockSize, const TargetInfo &target) {
+  int64_t warpSize = target.warpSize;
+  int64_t numWarps = warpSize ? blockSize / warpSize : 1;
+  int64_t kMPerWarp = 16;
+  int64_t kNPerWarp = target.isCuda && target.smVersion >= 70 ? 8 : 16;
+  if (M == 0 || N == 0 || numWarps == 0)
+    return {1, 1};
+
+  int64_t mWarp = 1;
+  int64_t nWarp = numWarps;
+  switch (policy) {
+  case attr::GemmWarpPolicy::FullRow: {
+    mWarp = numWarps;
+    if (M % (mWarp * kMPerWarp) != 0) {
+      int64_t maxMWarp = std::max<int64_t>(1, M / kMPerWarp);
+      mWarp = std::max<int64_t>(1, std::min<int64_t>(numWarps, maxMWarp));
+      nWarp = std::max<int64_t>(1, numWarps / mWarp);
+    } else {
+      nWarp = std::max<int64_t>(1, numWarps / mWarp);
+    }
+    break;
+  }
+  case attr::GemmWarpPolicy::FullCol: {
+    nWarp = numWarps;
+    if (N % (nWarp * kNPerWarp) != 0) {
+      int64_t maxNWarp = std::max<int64_t>(1, N / kNPerWarp);
+      nWarp = std::max<int64_t>(1, std::min<int64_t>(numWarps, maxNWarp));
+      mWarp = std::max<int64_t>(1, numWarps / nWarp);
+    } else {
+      mWarp = std::max<int64_t>(1, numWarps / nWarp);
+    }
+    break;
+  }
+  case attr::GemmWarpPolicy::Square:
+  default: {
+    float idealRatio = N > 0 ? static_cast<float>(M) / static_cast<float>(N)
+                             : 1.0f;
+    float bestScore = std::numeric_limits<float>::max();
+    for (int64_t m = 1; m <= numWarps; ++m) {
+      if (numWarps % m != 0)
+        continue;
+      int64_t n = numWarps / m;
+      float mPerWarp = static_cast<float>(M) / (m * kMPerWarp);
+      float nPerWarp = static_cast<float>(N) / (n * kNPerWarp);
+      if (mPerWarp < 1 || nPerWarp < 1)
+        continue;
+      float score = std::abs(mPerWarp / nPerWarp - idealRatio);
+      if (score < bestScore) {
+        bestScore = score;
+        mWarp = m;
+        nWarp = n;
+      }
+    }
+    break;
+  }
+  }
+  if (mWarp <= 0)
+    mWarp = 1;
+  if (nWarp <= 0)
+    nWarp = 1;
+  return {mWarp, nWarp};
+}
+
+} // namespace
 
 //===----------------------------------------------------------------------===//
 // -- KernelOp --
@@ -340,9 +548,6 @@ void ForOp::print(OpAsmPrinter &p) {
   p.printRegion(getRegion(), /*printEntryBlockArgs=*/false, /*printBlockTerminators=*/false);
 }
 
-//===----------------------------------------------------------------------===//
-// -- GemmOp --
-//===----------------------------------------------------------------------===//
 LogicalResult GemmOp::verify() {
   auto AType = dyn_cast<MemRefType>(getA().getType());
   auto BType = dyn_cast<MemRefType>(getB().getType());
@@ -364,78 +569,69 @@ LogicalResult GemmOp::verify() {
   return success();
 }
 
-// LogicalResult GemmOp::inferLayout(OpBuilder &builder, DenseMap<Value, Attribute> &LayoutMap) {
-//   Operation *op = this->getOperation();
+LogicalResult GemmOp::inferLayout(OpBuilder &builder,
+                                  DenseMap<Value, Attribute> &layoutMap) {
+  Operation *op = getOperation();
+  auto targetInfo = detectTargetInfo(op);
+  if (!targetInfo)
+    return emitOpError()
+           << "layout inference requires a 'frisk.target' string attribute";
+  auto blockSize = inferThreadBlockSize(op);
+  if (!blockSize)
+    return emitOpError()
+           << "layout inference requires an enclosing 'frisk.parallel' "
+              "operation to provide a thread count";
 
-//   Value A = getA(), B = getB(), C = getC();
-//   bool transA = getTransA(), transB = getTransB();
-//   int64_t M = getM(), N = getN(), K = getK();
-//   auto policy = getPolicy();
+  auto memA = dyn_cast<MemRefType>(getA().getType());
+  auto memB = dyn_cast<MemRefType>(getB().getType());
+  auto memC = dyn_cast<MemRefType>(getC().getType());
+  if (!memA || !memB || !memC)
+    return emitOpError("all operands must be memref values for layout inference");
 
-//   // auto target = frisk::getTargetFromOp(op);
-//   // int blockSize = frisk::getBlockSizeFrom(op);
-//   if(!target || blockSize <= 0){
-//     return op->emitError("Failed to get target or block size could not infer layout");
-//   }
+  auto requireMemorySpace = [&](MemRefType type, attr::MemorySpace expected,
+                                StringRef label) -> LogicalResult {
+    unsigned memSpace = type.getMemorySpaceAsInt();
+    unsigned expectedValue = static_cast<unsigned>(expected);
+    if (memSpace != expectedValue) {
+      return emitOpError()
+             << "operand " << label
+             << " must reside in memory space " << expectedValue;
+    }
+    return success();
+  };
 
-//   frisk::GemmInst gemmInst = frisk::GetGemmInst(op, blockSize, target);
-//   auto [warpM, warpN] = frisk::ComputeWarpPartition(policy, M, N, blockSize, target, gemnInst);
+  if (failed(requireMemorySpace(memA, attr::MemorySpace::Shared, "A")))
+    return failure();
+  if (failed(requireMemorySpace(memB, attr::MemorySpace::Shared, "B")))
+    return failure();
+  if (failed(requireMemorySpace(memC, attr::MemorySpace::Local, "C")))
+    return failure();
 
-//   Attribute layoutA, layoutB, fragC;
-//   int elementSize = A.getType().cast<MemRefType>().getElementTypeBitWidth();
-//   auto ctx = builder.getContext();
+  LayoutAttr layoutA = buildSharedLayoutForType(builder, memA, getTransA());
+  LayoutAttr layoutB = buildSharedLayoutForType(builder, memB, getTransB());
 
-//   if(frisk::TargetIsHopper(target)){
-//     auto shapeA = /* */;
-//     auto fwdIndexA = /* */;
-//     layoutA = LayoutAttr::get(ctx, shapeA, fwdIndexA, nullptr, nullptr);
+  if (!layoutA || !layoutB)
+    return emitOpError("unable to materialize shared-memory layouts");
 
-//     auto shapeB = /* */;
-//     auto fwdIndexB = /* */;
-//     layoutB = LayoutAttr::get(ctx, shapeB, fwdIndexB, nullptr, nullptr);
+  auto warpPartition =
+      computeWarpPartition(getPolicyAttr().getValue(), getM(), getN(),
+                           *blockSize, *targetInfo);
+  int64_t warpTileM =
+      std::max<int64_t>(1, getM() / std::max<int64_t>(warpPartition.first, 1));
+  int64_t warpTileN =
+      std::max<int64_t>(1, getN() / std::max<int64_t>(warpPartition.second, 1));
 
-//     auto shapeC = /* */;
-//     auto fwdIndexC = /* */;
-//     auto fwdThreadC = /* */;
-//     auto repSizeC = /* */;
-//     layoutC = LayoutAttr::get(ctx, shapeC, fwdIndexC, fwdThreadC, repSizeC);
-//   }else if{
+  LayoutAttr layoutC = buildFragmentLayoutAttr(
+      builder, memC, warpTileM, warpTileN, targetInfo->warpSize);
+  if (!layoutC)
+    return emitOpError("unable to materialize accumulator fragment layout");
 
-//   }else{
-
-//   }
-
-//   if(!layoutA || !layoutB || !fragC){
-//     return op->emitError("Failed to infer layout attributes for current config");
-//   }
-
-//   bool updated = false;
-//   auto itA = LayoutMap.find(A);
-//   if(itA == LayoutMap.end()){
-//     layoutMap[A] = layoutA;
-//     updated = true;
-//   }else{
-//     //检查兼容性，合并或报错
-//   }
-
-//   auto itB = LayoutMap.find(B);
-//   if(itB == LayoutMap.end()){
-//     layoutMap[B] = layoutB;
-//     updated = true;
-//   }else{
-//     //检查兼容性，合并或报错
-//   }
-
-//   auto itC = LayoutMap.find(C);
-//   if(itC == LayoutMap.end()){
-//     layoutMap[getC()] = layoutC;
-//     updated = true;
-//   }else{
-//     //检查兼容性，合并或报错
-//   }
-
-//   return success(updated);
-// }
+  bool updated = false;
+  updated |= layoutMap.try_emplace(getA(), layoutA).second;
+  updated |= layoutMap.try_emplace(getB(), layoutB).second;
+  updated |= layoutMap.try_emplace(getC(), layoutC).second;
+  return success(updated);
+}
 //===----------------------------------------------------------------------===//
 // -- AllocBufferOp --
 //===----------------------------------------------------------------------===//

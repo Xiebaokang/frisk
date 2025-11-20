@@ -14,29 +14,19 @@ def GemmWarpPolicyAttr : EnumAttr<Frisk_Dialect, GemmWarpPolicyEnum, "gemm_warp_
     let summary = "GEMM warp partitioning policy";
 }
 
-class Frisk_LayoutAttr : AttrDef<Frisk_Dialect, "layout"> {
+def LayoutAttr : AttrDef<Frisk_Dialect, "Layout"> {
     let cppNamespace = "::mlir::frisk";
+    let attrName = "frisk.layout";
 
-    let summary = "";
-
-    let storageNamespace = "detail";
-    let storageType = "LayoutAttrStorage";
-    let returnType = "::mlir::frisk::LayoutAttr";
-    let convertFromStorage = "$_storage";
+    let summary = "Describes a logical-to-physical mapping for tile layouts";
 
     let parameters = (ins
-        AttrParameter<"ArrayAttr", "input_shape">,
-        AttrParameter<"Attribute", "forward_index">,
-
-        AttrParameter<"Attribute", "forward_thread", /*defaultValue=*/"nullptr">,
-        AttrParameter<"Attribute", "replicate_size", /*defaultValue=*/"nullptr">     
+        AttrParameter<"::mlir::DenseI64ArrayAttr", "input shape">:$inputShape,
+        AttrParameter<"::mlir::AffineMapAttr", "forward index mapping">:$forwardIndex,
+        OptionalParameter<"::mlir::AffineMapAttr", "thread mapping">:$forwardThread,
+        OptionalParameter<"::mlir::IntegerAttr", "replication factor">:$replicateSize
     );
 
-    let extraClassDefinition = [{
-        bool isFragment() const {
-            return getForwardThread() != nullptr;
-        } 
-    }];
 }
 
 

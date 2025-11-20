@@ -268,6 +268,8 @@ def Frisk_GemmOp: Frisk_Op<"gemm", [Pure]> {
     ValueRange getAllMatrix() {
       return ValueRange(getOperation()->getOperands());
     }
+    ::mlir::LogicalResult inferLayout(::mlir::OpBuilder &builder,
+                                      llvm::DenseMap<::mlir::Value, ::mlir::Attribute> &layoutMap);
   }];
 
   // let extraClassDeclaration = [{
