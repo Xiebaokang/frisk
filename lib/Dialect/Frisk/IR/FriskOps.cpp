@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <limits>
-#include <vector>
+#include <numeric>
 #include <optional>
+#include <vector>
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -43,6 +45,16 @@ struct TargetInfo {
   unsigned warpSize = 32;
   StringRef rawName;
 };
+
+enum class GemmInst { MMA, WGMMA };
+
+static bool isHopper(const TargetInfo &info) {
+  return info.isCuda && info.smVersion >= 90;
+}
+
+static bool isAmpere(const TargetInfo &info) {
+  return info.isCuda && info.smVersion >= 80 && info.smVersion < 90;
+}
 
 static std::optional<TargetInfo> detectTargetInfo(Operation *op) {
   Operation *cur = op;
@@ -85,6 +97,333 @@ static std::optional<int64_t> inferThreadBlockSize(Operation *op) {
     cur = cur->getParentOp();
   }
   return std::nullopt;
+}
+
+static AffineExpr getDimExpr(unsigned idx, MLIRContext *ctx) {
+  return mlir::getAffineDimExpr(idx, ctx);
+}
+
+static AffineExpr getConstExpr(int64_t value, MLIRContext *ctx) {
+  return mlir::getAffineConstantExpr(value, ctx);
+}
+
+static AffineExpr floorDivConst(AffineExpr expr, int64_t divisor,
+                                MLIRContext *ctx) {
+  return expr.floorDiv(divisor);
+}
+
+static AffineExpr modConst(AffineExpr expr, int64_t divisor, MLIRContext *ctx) {
+  return expr - getConstExpr(divisor, ctx) * floorDivConst(expr, divisor, ctx);
+}
+
+static AffineExpr xor2x2(AffineExpr a, AffineExpr b, MLIRContext *ctx) {
+  AffineExpr sum = a + b;
+  AffineExpr two = getConstExpr(2, ctx);
+  return sum - two * floorDivConst(sum, 2, ctx);
+}
+
+static AffineExpr xor4x4(AffineExpr a, AffineExpr b, MLIRContext *ctx) {
+  AffineExpr i0 = modConst(a, 2, ctx);
+  AffineExpr j0 = modConst(b, 2, ctx);
+  AffineExpr i1 = floorDivConst(a, 2, ctx);
+  AffineExpr j1 = floorDivConst(b, 2, ctx);
+  return getConstExpr(2, ctx) * xor2x2(i1, j1, ctx) + xor2x2(i0, j0, ctx);
+}
+
+static AffineExpr xor8x8(AffineExpr a, AffineExpr b, MLIRContext *ctx) {
+  AffineExpr i0 = modConst(a, 2, ctx);
+  AffineExpr j0 = modConst(b, 2, ctx);
+  AffineExpr i1 = floorDivConst(a, 2, ctx);
+  AffineExpr j1 = floorDivConst(b, 2, ctx);
+  return getConstExpr(2, ctx) * xor4x4(i1, j1, ctx) + xor2x2(i0, j0, ctx);
+}
+
+static LayoutAttr makeLayoutAttr(OpBuilder &builder,
+                                 ArrayRef<int64_t> shape,
+                                 ArrayRef<AffineExpr> results) {
+  MLIRContext *ctx = builder.getContext();
+  auto shapeAttr = builder.getDenseI64ArrayAttr(shape);
+  auto map = AffineMap::get(shape.size(), 0, results, ctx);
+  return LayoutAttr::get(ctx, shapeAttr, AffineMapAttr::get(map),
+                         AffineMapAttr(), IntegerAttr());
+}
+
+struct FragmentExpr {
+  MLIRContext *ctx;
+  SmallVector<int64_t, 2> shape;
+  AffineExpr indexExpr;
+  int64_t indexExtent = 1;
+  AffineExpr threadExpr;
+  int64_t threadExtent = 1;
+  int64_t replicateSize = 1;
+
+  FragmentExpr repeat(ArrayRef<int64_t> repeats, bool repeatOnThread,
+                      bool lowerDimFirst) const {
+    assert(repeats.size() == shape.size());
+    FragmentExpr next = *this;
+    SmallVector<int64_t, 2> oldShape = shape;
+    for (size_t i = 0; i < repeats.size(); ++i)
+      next.shape[i] *= repeats[i];
+
+    auto substituteDims = [&](AffineExpr expr) {
+      for (size_t i = 0; i < oldShape.size(); ++i) {
+        if (oldShape[i] <= 0)
+          continue;
+        AffineExpr dim = getDimExpr(i, ctx);
+        expr = expr.replace(dim, modConst(dim, oldShape[i], ctx));
+      }
+      return expr;
+    };
+
+    AffineExpr localIndex = substituteDims(indexExpr);
+    AffineExpr localThread = substituteDims(threadExpr);
+
+    AffineExpr repeatsIndex = getConstExpr(0, ctx);
+    AffineExpr repeatStride = getConstExpr(1, ctx);
+
+    auto addContribution = [&](int64_t dimIdx) {
+      AffineExpr dim = getDimExpr(dimIdx, ctx);
+      if (oldShape[dimIdx] <= 0)
+        return;
+      AffineExpr quotient = floorDivConst(dim, oldShape[dimIdx], ctx);
+      repeatsIndex = repeatsIndex + quotient * repeatStride;
+      repeatStride =
+          repeatStride * getConstExpr(repeats[dimIdx], ctx);
+    };
+
+    if (lowerDimFirst) {
+      for (int64_t i = static_cast<int64_t>(oldShape.size()) - 1; i >= 0; --i)
+        addContribution(i);
+    } else {
+      for (size_t i = 0; i < oldShape.size(); ++i)
+        addContribution(i);
+    }
+
+    int64_t repeatProduct = 1;
+    for (int64_t value : repeats)
+      repeatProduct *= value;
+
+    if (repeatOnThread) {
+      next.threadExpr = localThread +
+                        getConstExpr(threadExtent, ctx) * repeatsIndex;
+      next.threadExtent *= repeatProduct;
+      next.indexExpr = localIndex;
+    } else {
+      next.threadExpr = localThread;
+      next.indexExpr =
+          localIndex + getConstExpr(indexExtent, ctx) * repeatsIndex;
+      next.indexExtent *= repeatProduct;
+    }
+    next.replicateSize = replicateSize;
+    return next;
+  }
+};
+
+static FragmentExpr makeFragment8x8(MLIRContext *ctx) {
+  FragmentExpr frag;
+  frag.ctx = ctx;
+  frag.shape = {8, 8};
+  AffineExpr i = getDimExpr(0, ctx);
+  AffineExpr j = getDimExpr(1, ctx);
+  frag.indexExpr = modConst(j, 2, ctx);
+  frag.indexExtent = 2;
+  frag.threadExpr = floorDivConst(j, 2, ctx) + getConstExpr(4, ctx) * i;
+  frag.threadExtent = 32;
+  frag.replicateSize = 1;
+  return frag;
+}
+
+static LayoutAttr makeFragmentLayout(OpBuilder &builder,
+                                     const FragmentExpr &frag) {
+  MLIRContext *ctx = builder.getContext();
+  auto shapeAttr = builder.getDenseI64ArrayAttr(frag.shape);
+  SmallVector<AffineExpr, 1> indexResults = {frag.indexExpr};
+  SmallVector<AffineExpr, 1> threadResults = {frag.threadExpr};
+  auto indexMap =
+      AffineMap::get(frag.shape.size(), 0, indexResults, ctx);
+  auto threadMap =
+      AffineMap::get(frag.shape.size(), 0, threadResults, ctx);
+  auto replicateAttr = builder.getI64IntegerAttr(frag.replicateSize);
+  return LayoutAttr::get(ctx, shapeAttr, AffineMapAttr::get(indexMap),
+                         AffineMapAttr::get(threadMap), replicateAttr);
+}
+
+static std::optional<FragmentExpr>
+buildAmpereFragmentC(MLIRContext *ctx, int64_t blockM, int64_t blockN,
+                     int64_t warpTileM, int64_t warpTileN) {
+  if (warpTileM % 16 != 0 || warpTileN % 8 != 0)
+    return std::nullopt;
+  if (blockM % warpTileM != 0 || blockN % warpTileN != 0)
+    return std::nullopt;
+
+  FragmentExpr base = makeFragment8x8(ctx).repeat({2, 1}, /*repeatOnThread=*/false,
+                                                  /*lowerDimFirst=*/true);
+  int64_t warpRepeatM = std::max<int64_t>(1, blockM / warpTileM);
+  int64_t warpRepeatN = std::max<int64_t>(1, blockN / warpTileN);
+  FragmentExpr warpLayout =
+      base.repeat({warpRepeatM, warpRepeatN}, /*repeatOnThread=*/true,
+                  /*lowerDimFirst=*/false);
+  int64_t innerRepeatM = std::max<int64_t>(1, warpTileM / 16);
+  int64_t innerRepeatN = std::max<int64_t>(1, warpTileN / 8);
+  FragmentExpr blockLayout =
+      warpLayout.repeat({innerRepeatM, innerRepeatN},
+                        /*repeatOnThread=*/false, /*lowerDimFirst=*/false);
+  return blockLayout;
+}
+
+static std::optional<FragmentExpr>
+buildHopperFragmentC(MLIRContext *ctx, int64_t blockM, int64_t blockN,
+                     int64_t warpTileM, int64_t warpTileN) {
+  if (warpTileM % 16 != 0 || warpTileN % 8 != 0)
+    return std::nullopt;
+  if (blockM % warpTileM != 0 || blockN % warpTileN != 0)
+    return std::nullopt;
+
+  int64_t warpRepeatN = std::max<int64_t>(1, warpTileN / 8);
+  FragmentExpr warpLayout =
+      makeFragment8x8(ctx).repeat({2, warpRepeatN}, /*repeatOnThread=*/false,
+                                  /*lowerDimFirst=*/false);
+  FragmentExpr blockLayout =
+      warpLayout.repeat({std::max<int64_t>(1, blockM / warpTileM),
+                         std::max<int64_t>(1, blockN / warpTileN)},
+                        /*repeatOnThread=*/true, /*lowerDimFirst=*/false);
+  FragmentExpr finalLayout =
+      blockLayout.repeat({std::max<int64_t>(1, warpTileM / 16), 1},
+                         /*repeatOnThread=*/false, /*lowerDimFirst=*/false);
+  return finalLayout;
+}
+
+static LayoutAttr makeLinearLayout(OpBuilder &builder, int64_t rows,
+                                   int64_t cols, int64_t linearStride = -1) {
+  MLIRContext *ctx = builder.getContext();
+  AffineExpr i = getDimExpr(0, ctx);
+  AffineExpr j = getDimExpr(1, ctx);
+  int64_t stride = (linearStride < 0) ? cols : linearStride;
+  AffineExpr expr = i * getConstExpr(stride, ctx) + j;
+  SmallVector<AffineExpr, 1> results = {expr};
+  return makeLayoutAttr(builder, {rows, cols}, results);
+}
+
+static LayoutAttr makePaddedLayout(OpBuilder &builder, int64_t rows,
+                                   int64_t cols, int64_t elementBits) {
+  int64_t padded = cols;
+  if (elementBits > 0 && (elementBits * cols) % 256 == 0)
+    padded += 128 / elementBits;
+  return makeLinearLayout(builder, rows, cols, padded);
+}
+
+static LayoutAttr makeQuarterBankSwizzle(OpBuilder &builder, int64_t rows,
+                                         int64_t cols, int64_t elementBits) {
+  MLIRContext *ctx = builder.getContext();
+  int64_t vectorSize = 128 / elementBits;
+  AffineExpr i = getDimExpr(0, ctx);
+  AffineExpr j = getDimExpr(1, ctx);
+  AffineExpr ts = floorDivConst(i, 8, ctx);
+  AffineExpr s = modConst(i, 8, ctx);
+  AffineExpr block = floorDivConst(j, vectorSize, ctx);
+  AffineExpr tc = floorDivConst(block, 2, ctx);
+  AffineExpr c = modConst(block, 2, ctx);
+  AffineExpr vec = modConst(j, vectorSize, ctx);
+  AffineExpr cSwizzle = xor2x2(c, floorDivConst(s, 4, ctx), ctx);
+  AffineExpr index = vec +
+                     (cSwizzle + s * getConstExpr(2, ctx)) *
+                         getConstExpr(vectorSize, ctx);
+  SmallVector<AffineExpr, 3> results = {tc, ts, index};
+  return makeLayoutAttr(builder, {rows, cols}, results);
+}
+
+static LayoutAttr makeHalfBankSwizzle(OpBuilder &builder, int64_t rows,
+                                      int64_t cols, int64_t elementBits) {
+  MLIRContext *ctx = builder.getContext();
+  int64_t vectorSize = 128 / elementBits;
+  AffineExpr i = getDimExpr(0, ctx);
+  AffineExpr j = getDimExpr(1, ctx);
+  AffineExpr ts = floorDivConst(i, 8, ctx);
+  AffineExpr s = modConst(i, 8, ctx);
+  AffineExpr block = floorDivConst(j, vectorSize, ctx);
+  AffineExpr tc = floorDivConst(block, 4, ctx);
+  AffineExpr c = modConst(block, 4, ctx);
+  AffineExpr vec = modConst(j, vectorSize, ctx);
+  AffineExpr cSwizzle = xor4x4(c, floorDivConst(s, 2, ctx), ctx);
+  AffineExpr index = vec +
+                     (cSwizzle + s * getConstExpr(4, ctx)) *
+                         getConstExpr(vectorSize, ctx);
+  SmallVector<AffineExpr, 3> results = {tc, ts, index};
+  return makeLayoutAttr(builder, {rows, cols}, results);
+}
+
+static LayoutAttr makeFullBankSwizzle(OpBuilder &builder, int64_t rows,
+                                      int64_t cols, int64_t elementBits) {
+  MLIRContext *ctx = builder.getContext();
+  int64_t vectorSize = 128 / elementBits;
+  AffineExpr i = getDimExpr(0, ctx);
+  AffineExpr j = getDimExpr(1, ctx);
+  AffineExpr ts = floorDivConst(i, 8, ctx);
+  AffineExpr s = modConst(i, 8, ctx);
+  AffineExpr block = floorDivConst(j, vectorSize, ctx);
+  AffineExpr tc = floorDivConst(block, 8, ctx);
+  AffineExpr c = modConst(block, 8, ctx);
+  AffineExpr vec = modConst(j, vectorSize, ctx);
+  AffineExpr cSwizzle = xor8x8(c, s, ctx);
+  AffineExpr index = vec +
+                     (cSwizzle + s * getConstExpr(8, ctx)) *
+                         getConstExpr(vectorSize, ctx);
+  SmallVector<AffineExpr, 3> results = {tc, ts, index};
+  return makeLayoutAttr(builder, {rows, cols}, results);
+}
+
+static LayoutAttr buildAmpereSharedLayout(OpBuilder &builder, MemRefType type,
+                                          bool kInner) {
+  if (type.getRank() < 2)
+    return LayoutAttr();
+  ArrayRef<int64_t> shape = type.getShape();
+  int64_t stride = shape[shape.size() - 2];
+  int64_t cont = shape.back();
+  int64_t elementBits = type.getElementTypeBitWidth();
+  if (elementBits == 0)
+    return LayoutAttr();
+
+  if (elementBits == 64)
+    return makePaddedLayout(builder, stride, cont, elementBits);
+
+  int64_t vectorSize = 128 / elementBits;
+  if (!kInner && elementBits == 8)
+    return makePaddedLayout(builder, stride, cont, elementBits);
+  if (cont % (vectorSize * 8) == 0)
+    return makeFullBankSwizzle(builder, stride, cont, elementBits);
+  if (cont % (vectorSize * 4) == 0)
+    return makeHalfBankSwizzle(builder, stride, cont, elementBits);
+  return makePaddedLayout(builder, stride, cont, elementBits);
+}
+
+static LayoutAttr buildHopperSharedLayout(OpBuilder &builder, MemRefType type,
+                                          bool kInner) {
+  if (type.getRank() < 2)
+    return LayoutAttr();
+  ArrayRef<int64_t> shape = type.getShape();
+  int64_t stride = shape[shape.size() - 2];
+  int64_t cont = shape.back();
+  int64_t elementBits = type.getElementTypeBitWidth();
+  if (elementBits == 0)
+    return LayoutAttr();
+
+  int64_t vectorSize = 128 / elementBits;
+  if (cont % (vectorSize * 8) == 0)
+    return makeFullBankSwizzle(builder, stride, cont, elementBits);
+  if (cont % (vectorSize * 4) == 0)
+    return makeHalfBankSwizzle(builder, stride, cont, elementBits);
+  if (cont % (vectorSize * 2) == 0)
+    return makeQuarterBankSwizzle(builder, stride, cont, elementBits);
+  if (cont % vectorSize == 0)
+    return makeLinearLayout(builder, stride, cont);
+  return LayoutAttr();
+}
+
+static GemmInst inferGemmInst(const TargetInfo &info, int64_t blockSize,
+                              int64_t M, int64_t N) {
+  if (isHopper(info) && blockSize % 128 == 0 && M >= 64 && N >= 64)
+    return GemmInst::WGMMA;
+  return GemmInst::MMA;
 }
 
 static FailureOr<std::array<int64_t, 2>> extractMatrixShape(MemRefType type) {
@@ -548,6 +887,9 @@ void ForOp::print(OpAsmPrinter &p) {
   p.printRegion(getRegion(), /*printEntryBlockArgs=*/false, /*printBlockTerminators=*/false);
 }
 
+//===----------------------------------------------------------------------===//
+// -- GemmOp --
+//===----------------------------------------------------------------------===//
 LogicalResult GemmOp::verify() {
   auto AType = dyn_cast<MemRefType>(getA().getType());
   auto BType = dyn_cast<MemRefType>(getB().getType());
@@ -607,24 +949,39 @@ LogicalResult GemmOp::inferLayout(OpBuilder &builder,
   if (failed(requireMemorySpace(memC, attr::MemorySpace::Local, "C")))
     return failure();
 
-  LayoutAttr layoutA = buildSharedLayoutForType(builder, memA, getTransA());
-  LayoutAttr layoutB = buildSharedLayoutForType(builder, memB, getTransB());
+  bool hopper = isHopper(*targetInfo);
+  bool ampere = isAmpere(*targetInfo);
+  if (!hopper && !ampere)
+    return emitOpError(
+        "layout inference currently supports only Ampere or Hopper targets");
 
+  LayoutAttr layoutA = hopper ? buildHopperSharedLayout(builder, memA, !getTransA())
+                              : buildAmpereSharedLayout(builder, memA, !getTransA());
+  LayoutAttr layoutB = hopper ? buildHopperSharedLayout(builder, memB, getTransB())
+                              : buildAmpereSharedLayout(builder, memB, getTransB());
   if (!layoutA || !layoutB)
-    return emitOpError("unable to materialize shared-memory layouts");
+    return emitOpError("unable to materialize shared-memory swizzled layouts");
 
   auto warpPartition =
       computeWarpPartition(getPolicyAttr().getValue(), getM(), getN(),
                            *blockSize, *targetInfo);
-  int64_t warpTileM =
-      std::max<int64_t>(1, getM() / std::max<int64_t>(warpPartition.first, 1));
-  int64_t warpTileN =
-      std::max<int64_t>(1, getN() / std::max<int64_t>(warpPartition.second, 1));
+  int64_t warpCountM = std::max<int64_t>(warpPartition.first, 1);
+  int64_t warpCountN = std::max<int64_t>(warpPartition.second, 1);
+  int64_t warpTileM = getM() / warpCountM;
+  int64_t warpTileN = getN() / warpCountN;
+  GemmInst inst = inferGemmInst(*targetInfo, *blockSize, getM(), getN());
 
-  LayoutAttr layoutC = buildFragmentLayoutAttr(
-      builder, memC, warpTileM, warpTileN, targetInfo->warpSize);
-  if (!layoutC)
-    return emitOpError("unable to materialize accumulator fragment layout");
+  std::optional<FragmentExpr> fragment;
+  if (hopper && inst == GemmInst::WGMMA)
+    fragment = buildHopperFragmentC(builder.getContext(), getM(), getN(),
+                                    warpTileM, warpTileN);
+  else
+    fragment = buildAmpereFragmentC(builder.getContext(), getM(), getN(),
+                                    warpTileM, warpTileN);
+  if (!fragment)
+    return emitOpError("unable to build accumulator fragment for current warp "
+                       "shape; check warp policy and target");
+  LayoutAttr layoutC = makeFragmentLayout(builder, *fragment);
 
   bool updated = false;
   updated |= layoutMap.try_emplace(getA(), layoutA).second;
