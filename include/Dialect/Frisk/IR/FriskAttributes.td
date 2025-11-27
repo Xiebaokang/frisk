@@ -16,9 +16,9 @@ def GemmWarpPolicyAttr : EnumAttr<Frisk_Dialect, GemmWarpPolicyEnum, "gemm_warp_
 
 def LayoutAttr : AttrDef<Frisk_Dialect, "Layout"> {
     let cppNamespace = "::mlir::frisk";
-    let attrName = "frisk.layout";
-
     let summary = "Describes a logical-to-physical mapping for tile layouts";
+    let mnemonic = "layout";
+    let assemblyFormat = "`<` $inputShape `,` $forwardIndex (`,` $forwardThread^)? (`,` $replicateSize^)? `>`";
 
     let parameters = (ins
         AttrParameter<"::mlir::DenseI64ArrayAttr", "input shape">:$inputShape,

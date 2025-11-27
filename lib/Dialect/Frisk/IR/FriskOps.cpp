@@ -219,6 +219,20 @@ struct FragmentExpr {
   }
 };
 
+static FragmentExpr makeFragment8x4(MLIRContext *ctx) {
+  FragmentExpr frag;
+  frag.ctx = ctx;
+  frag.shape = {8, 4};
+  AffineExpr i = getDimExpr(0, ctx);
+  AffineExpr j = getDimExpr(1, ctx);
+  frag.indexExpr = modConst(j, 1, ctx);
+  frag.indexExtent = 1;
+  frag.threadExpr = floorDivConst(j, 1, ctx) + getConstExpr(4, ctx) * i;
+  frag.threadExtent = 32;
+  frag.replicateSize = 1;
+  return frag;
+}
+
 static FragmentExpr makeFragment8x8(MLIRContext *ctx) {
   FragmentExpr frag;
   frag.ctx = ctx;
@@ -228,6 +242,34 @@ static FragmentExpr makeFragment8x8(MLIRContext *ctx) {
   frag.indexExpr = modConst(j, 2, ctx);
   frag.indexExtent = 2;
   frag.threadExpr = floorDivConst(j, 2, ctx) + getConstExpr(4, ctx) * i;
+  frag.threadExtent = 32;
+  frag.replicateSize = 1;
+  return frag;
+}
+
+static FragmentExpr makeFragment8x16(MLIRContext *ctx) {
+  FragmentExpr frag;
+  frag.ctx = ctx;
+  frag.shape = {8, 16};
+  AffineExpr i = getDimExpr(0, ctx);
+  AffineExpr j = getDimExpr(1, ctx);
+  frag.indexExpr = modConst(j, 4, ctx);
+  frag.indexExtent = 4;
+  frag.threadExpr = floorDivConst(j, 4, ctx) + getConstExpr(4, ctx) * i;
+  frag.threadExtent = 32;
+  frag.replicateSize = 1;
+  return frag;
+}
+
+static FragmentExpr makeFragment8x8Transposed(MLIRContext *ctx) {
+  FragmentExpr frag;
+  frag.ctx = ctx;
+  frag.shape = {8, 8};
+  AffineExpr i = getDimExpr(0, ctx);
+  AffineExpr j = getDimExpr(1, ctx);
+  frag.indexExpr = modConst(i, 2, ctx);
+  frag.indexExtent = 2;
+  frag.threadExpr = floorDivConst(i, 2, ctx) + getConstExpr(4, ctx) * j;
   frag.threadExtent = 32;
   frag.replicateSize = 1;
   return frag;
@@ -312,6 +354,34 @@ static LayoutAttr makePaddedLayout(OpBuilder &builder, int64_t rows,
   return makeLinearLayout(builder, rows, cols, padded);
 }
 
+static LayoutAttr makeLayoutF64_Kinner(OpBuilder &builder, int64_t rows, int64_t cols) {
+  MLIRContext *ctx = builder.getContext();
+  AffineExpr i = getDimExpr(0, ctx);
+  AffineExpr j = getDimExpr(1, ctx);
+  AffineExpr tc = floorDivConst(j, 16, ctx);
+  AffineExpr ts = floorDivConst(i, 4, ctx);
+  AffineExpr c = modConst(j, 16, ctx);
+  AffineExpr s = modConst(i, 4, ctx);
+  AffineExpr cSwizzle = floorDivConst(c, 4, ctx) * 4 + xor4x4(modConst(c, 4, ctx), s, ctx);
+  AffineExpr index = cSwizzle + s * getConstExpr(16, ctx);
+  SmallVector<AffineExpr, 3> results = {tc, ts, index};
+  return makeLayoutAttr(builder, {rows, cols}, results);
+}
+
+static LayoutAttr makeLayoutF64_Kouter(OpBuilder &builder, int64_t rows, int64_t cols) {
+  MLIRContext *ctx = builder.getContext();
+  AffineExpr i = getDimExpr(0, ctx);
+  AffineExpr j = getDimExpr(1, ctx);
+  AffineExpr tc = floorDivConst(j, 16, ctx);
+  AffineExpr ts = floorDivConst(i, 4, ctx);
+  AffineExpr c = modConst(j, 16, ctx);
+  AffineExpr s = modConst(i, 4, ctx);
+  AffineExpr cSwizzle = floorDivConst(c, 4, ctx) + xor4x4(modConst(c, 4, ctx), s, ctx) * 4;
+  AffineExpr index = cSwizzle + s * getConstExpr(16, ctx);
+  SmallVector<AffineExpr, 3> results = {tc, ts, index};
+  return makeLayoutAttr(builder, {rows, cols}, results);
+}
+
 static LayoutAttr makeQuarterBankSwizzle(OpBuilder &builder, int64_t rows,
                                          int64_t cols, int64_t elementBits) {
   MLIRContext *ctx = builder.getContext();
@@ -383,8 +453,13 @@ static LayoutAttr buildAmpereSharedLayout(OpBuilder &builder, MemRefType type,
   if (elementBits == 0)
     return LayoutAttr();
 
-  if (elementBits == 64)
+  if (elementBits == 64){
+    if (!kInner && cont % 16 == 0) //float64 KxN
+      return makeLayoutF64_Kouter(builder, stride, cont);
+    if (kInner && cont % 16 == 0) //float64 NxK
+      return makeLayoutF64_Kinner(builder, stride, cont);
     return makePaddedLayout(builder, stride, cont, elementBits);
+  }
 
   int64_t vectorSize = 128 / elementBits;
   if (!kInner && elementBits == 8)
@@ -406,6 +481,14 @@ static LayoutAttr buildHopperSharedLayout(OpBuilder &builder, MemRefType type,
   int64_t elementBits = type.getElementTypeBitWidth();
   if (elementBits == 0)
     return LayoutAttr();
+  
+  if (elementBits == 64){
+    if (!kInner && cont % 16 == 0) //float64 KxN
+      return makeLayoutF64_Kouter(builder, stride, cont);
+    if (kInner && cont % 16 == 0) //float64 NxK
+      return makeLayoutF64_Kinner(builder, stride, cont);
+    return makeQuarterBankSwizzle(builder, stride, cont, elementBits);
+  }
 
   int64_t vectorSize = 128 / elementBits;
   if (cont % (vectorSize * 8) == 0)

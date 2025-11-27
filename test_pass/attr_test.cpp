@@ -192,6 +192,10 @@ bool testGemmLayoutInference(MLIRContext &context) {
     return false;
   }
 
+  printHeader("Constructed Module IR");
+  module->print(llvm::outs());
+  llvm::outs() << "\n";
+
   OpBuilder builder(&context);
   builder.setInsertionPoint(target);
   llvm::DenseMap<Value, Attribute> layoutMap;
