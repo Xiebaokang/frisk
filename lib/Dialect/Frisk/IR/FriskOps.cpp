@@ -217,6 +217,13 @@ struct FragmentExpr {
     next.replicateSize = replicateSize;
     return next;
   }
+
+  FragmentExpr replicate(int64_t repeats) const {
+    assert(repeats >= 1 && "replicate factor must be positive");
+    FragmentExpr next = *this;
+    next.replicateSize *= repeats;
+    return next;
+  }
 };
 
 static FragmentExpr makeFragment8x4(MLIRContext *ctx) {
@@ -333,6 +340,110 @@ buildHopperFragmentC(MLIRContext *ctx, int64_t blockM, int64_t blockN,
       blockLayout.repeat({std::max<int64_t>(1, warpTileM / 16), 1},
                          /*repeatOnThread=*/false, /*lowerDimFirst=*/false);
   return finalLayout;
+}
+
+static std::optional<FragmentExpr>
+buildGemmFragmentA(MLIRContext *ctx, int64_t blockM, int64_t blockN,
+                   int64_t blockK, int64_t warpTileM, int64_t warpTileN,
+                   int64_t elementBits, bool transposed) {
+  if (blockM <= 0 || blockN <= 0 || blockK <= 0 || warpTileM <= 0 ||
+      warpTileN <= 0)
+    return std::nullopt;
+  if (blockM % warpTileM != 0 || blockN % warpTileN != 0)
+    return std::nullopt;
+  if (warpTileM % 16 != 0 || blockK % 16 != 0)
+    return std::nullopt;
+  if (elementBits != 8 && elementBits != 16 && elementBits != 32)
+    return std::nullopt;
+
+  int64_t warpRepeatM = blockM / warpTileM;
+  int64_t warpRepeatN = blockN / warpTileN;
+
+  if (transposed) {
+    FragmentExpr base = makeFragment8x8Transposed(ctx).repeat({2, 2}, /*repeatOnThread=*/false,
+                                                              /*lowerDimFirst=*/true);
+    FragmentExpr warpLayout = base.repeat({1, warpRepeatM}, /*repeatOnThread=*/true,
+                                          /*lowerDimFirst=*/false)
+                                  .replicate(warpRepeatN);
+    FragmentExpr blockLayout = warpLayout.repeat({blockK / 16, warpTileM / 16},
+                                                  /*repeatOnThread=*/false,
+                                                  /*lowerDimFirst=*/true);
+    return blockLayout;
+  }
+
+  if (elementBits == 8) {
+    if (blockK % 32 != 0)
+      return std::nullopt;
+    FragmentExpr base = makeFragment8x16(ctx).repeat({2, 2}, /*repeatOnThread=*/false,
+                                                     /*lowerDimFirst=*/false);
+    FragmentExpr warpLayout = base.repeat({warpRepeatM, 1}, /*repeatOnThread=*/true,
+                                          /*lowerDimFirst=*/true)
+                                  .replicate(warpRepeatN);
+    FragmentExpr blockLayout = warpLayout.repeat({warpTileM / 16, blockK / 32},
+                                                  /*repeatOnThread=*/false,
+                                                  /*lowerDimFirst=*/false);
+    return blockLayout;
+  }
+  if (elementBits == 16) {
+    FragmentExpr base = makeFragment8x8(ctx).repeat({2, 2}, /*repeatOnThread=*/false,
+                                    /*lowerDimFirst=*/false);
+    FragmentExpr warpLayout = base.repeat({warpRepeatM, 1}, /*repeatOnThread=*/true,
+                                          /*lowerDimFirst=*/true)
+                                  .replicate(warpRepeatN);
+    FragmentExpr blockLayout = warpLayout.repeat({warpTileM / 16, blockK / 16},
+                                                  /*repeatOnThread=*/false,
+                                                  /*lowerDimFirst=*/false);
+    return blockLayout;
+  }
+  if (blockK % 8 != 0)
+    return std::nullopt;
+  FragmentExpr base = makeFragment8x4(ctx).repeat({2, 2}, /*repeatOnThread=*/false,
+                                                  /*lowerDimFirst=*/false);
+  FragmentExpr warpLayout = base.repeat({warpRepeatM, 1}, /*repeatOnThread=*/true,
+                                        /*lowerDimFirst=*/true)
+                                .replicate(warpRepeatN);
+  FragmentExpr blockLayout = warpLayout.repeat({warpTileM / 16, blockK / 8},
+                                              /*repeatOnThread=*/false,
+                                              /*lowerDimFirst=*/false);
+  return blockLayout;
+}
+
+static std::optional<FragmentExpr>
+buildGemmFragmentB(MLIRContext *ctx, int64_t blockM, int64_t blockN,
+                   int64_t blockK, int64_t warpTileM, int64_t warpTileN,
+                   bool transposed) {
+  if (blockM <= 0 || blockN <= 0 || blockK <= 0 || warpTileM <= 0 ||
+      warpTileN <= 0)
+    return std::nullopt;
+  if (blockM % warpTileM != 0 || blockN % warpTileN != 0)
+    return std::nullopt;
+  if (warpTileN % 8 != 0 || blockK % 16 != 0)
+    return std::nullopt;
+
+  int64_t warpRepeatM = blockM / warpTileM;
+  int64_t warpRepeatN = blockN / warpTileN;
+
+  if (transposed) {
+    FragmentExpr base = makeFragment8x8(ctx).repeat({1, 2}, /*repeatOnThread=*/false,
+                                                    /*lowerDimFirst=*/false);
+    FragmentExpr warpLayout = base.replicate(warpRepeatM)
+                                  .repeat({warpRepeatN, 1}, /*repeatOnThread=*/true,
+                                          /*lowerDimFirst=*/false);
+    FragmentExpr blockLayout = warpLayout.repeat({warpTileN / 8, blockK / 16},
+                                                  /*repeatOnThread=*/false,
+                                                  /*lowerDimFirst=*/false);
+    return blockLayout;
+  }
+
+  FragmentExpr base = makeFragment8x8Transposed(ctx).repeat({2, 1}, /*repeatOnThread=*/false,
+                                                            /*lowerDimFirst=*/false);
+  FragmentExpr warpLayout = base.replicate(warpRepeatM)
+                                .repeat({1, warpRepeatN}, /*repeatOnThread=*/true,
+                                        /*lowerDimFirst=*/true);
+  FragmentExpr blockLayout = warpLayout.repeat({blockK / 16, warpTileN / 8},
+                                                /*repeatOnThread=*/false,
+                                                /*lowerDimFirst=*/true);
+  return blockLayout;
 }
 
 static LayoutAttr makeLinearLayout(OpBuilder &builder, int64_t rows,
@@ -1013,23 +1124,34 @@ LogicalResult GemmOp::inferLayout(OpBuilder &builder,
   if (!memA || !memB || !memC)
     return emitOpError("all operands must be memref values for layout inference");
 
-  auto requireMemorySpace = [&](MemRefType type, attr::MemorySpace expected,
-                                StringRef label) -> LogicalResult {
+  auto parseMemorySpace = [&](MemRefType type,
+                              StringRef label) -> std::optional<attr::MemorySpace> {
     unsigned memSpace = type.getMemorySpaceAsInt();
-    unsigned expectedValue = static_cast<unsigned>(expected);
-    if (memSpace != expectedValue) {
-      return emitOpError()
-             << "operand " << label
-             << " must reside in memory space " << expectedValue;
-    }
-    return success();
+    if (auto symbolic = attr::symbolizeMemorySpace(memSpace))
+      return *symbolic;
+    emitOpError() << "operand " << label
+                  << " resides in unsupported memory space " << memSpace;
+    return std::nullopt;
   };
 
-  if (failed(requireMemorySpace(memA, attr::MemorySpace::Shared, "A")))
+  auto aSpace = parseMemorySpace(memA, "A");
+  auto bSpace = parseMemorySpace(memB, "B");
+  auto cSpace = parseMemorySpace(memC, "C");
+  if (!aSpace || !bSpace || !cSpace)
     return failure();
-  if (failed(requireMemorySpace(memB, attr::MemorySpace::Shared, "B")))
-    return failure();
-  if (failed(requireMemorySpace(memC, attr::MemorySpace::Local, "C")))
+
+  if (*cSpace != attr::MemorySpace::Local)
+    return emitOpError("operand C must reside in local memory space");
+  auto isSupportedOperandSpace = [&](attr::MemorySpace space,
+                                     StringRef label) -> LogicalResult {
+    if (space != attr::MemorySpace::Shared && space != attr::MemorySpace::Local)
+      return emitOpError()
+             << "operand " << label
+             << " must reside in shared or local memory space for layout inference";
+    return success();
+  };
+  if (failed(isSupportedOperandSpace(*aSpace, "A")) ||
+      failed(isSupportedOperandSpace(*bSpace, "B")))
     return failure();
 
   bool hopper = isHopper(*targetInfo);
@@ -1038,21 +1160,55 @@ LogicalResult GemmOp::inferLayout(OpBuilder &builder,
     return emitOpError(
         "layout inference currently supports only Ampere or Hopper targets");
 
-  LayoutAttr layoutA = hopper ? buildHopperSharedLayout(builder, memA, !getTransA())
-                              : buildAmpereSharedLayout(builder, memA, !getTransA());
-  LayoutAttr layoutB = hopper ? buildHopperSharedLayout(builder, memB, getTransB())
-                              : buildAmpereSharedLayout(builder, memB, getTransB());
-  if (!layoutA || !layoutB)
-    return emitOpError("unable to materialize shared-memory swizzled layouts");
+  int64_t blockM = getM();
+  int64_t blockN = getN();
+  int64_t blockK = getK();
 
   auto warpPartition =
-      computeWarpPartition(getPolicyAttr().getValue(), getM(), getN(),
+      computeWarpPartition(getPolicyAttr().getValue(), blockM, blockN,
                            *blockSize, *targetInfo);
   int64_t warpCountM = std::max<int64_t>(warpPartition.first, 1);
   int64_t warpCountN = std::max<int64_t>(warpPartition.second, 1);
-  int64_t warpTileM = getM() / warpCountM;
-  int64_t warpTileN = getN() / warpCountN;
-  GemmInst inst = inferGemmInst(*targetInfo, *blockSize, getM(), getN());
+  if (warpCountM == 0 || warpCountN == 0)
+    return emitOpError("invalid warp partition derived from warp policy");
+  if (blockM % warpCountM != 0 || blockN % warpCountN != 0)
+    return emitOpError("block shape must be divisible by warp partition");
+  int64_t warpTileM = blockM / warpCountM;
+  int64_t warpTileN = blockN / warpCountN;
+  GemmInst inst = inferGemmInst(*targetInfo, *blockSize, blockM, blockN);
+
+  LayoutAttr layoutA;
+  if (*aSpace == attr::MemorySpace::Shared) {
+    layoutA = hopper ? buildHopperSharedLayout(builder, memA, !getTransA())
+                     : buildAmpereSharedLayout(builder, memA, !getTransA());
+    if (!layoutA)
+      return emitOpError("unable to materialize shared-memory layout for operand A");
+  } else {
+    auto fragmentA = buildGemmFragmentA(builder.getContext(), blockM, blockN,
+                                        blockK, warpTileM, warpTileN,
+                                        memA.getElementTypeBitWidth(),
+                                        getTransA());
+    if (!fragmentA)
+      return emitOpError("unable to build fragment layout for operand A; "
+                         "check tile shape and element type");
+    layoutA = makeFragmentLayout(builder, *fragmentA);
+  }
+
+  LayoutAttr layoutB;
+  if (*bSpace == attr::MemorySpace::Shared) {
+    layoutB = hopper ? buildHopperSharedLayout(builder, memB, getTransB())
+                     : buildAmpereSharedLayout(builder, memB, getTransB());
+    if (!layoutB)
+      return emitOpError("unable to materialize shared-memory layout for operand B");
+  } else {
+    auto fragmentB = buildGemmFragmentB(builder.getContext(), blockM, blockN,
+                                        blockK, warpTileM, warpTileN,
+                                        getTransB());
+    if (!fragmentB)
+      return emitOpError("unable to build fragment layout for operand B; "
+                         "check warp policy and tile shape");
+    layoutB = makeFragmentLayout(builder, *fragmentB);
+  }
 
   std::optional<FragmentExpr> fragment;
   if (hopper && inst == GemmInst::WGMMA)

@@ -144,36 +144,45 @@ bool testLayoutAttr(MLIRContext &context) {
   return true;
 }
 
-bool testGemmLayoutInference(MLIRContext &context) {
-  printHeader("Gemm Layout Inference");
+static const char *describeMemorySpace(mlir::frisk::attr::MemorySpace space) {
+  switch (space) {
+  case mlir::frisk::attr::MemorySpace::Local:
+    return "local";
+  case mlir::frisk::attr::MemorySpace::Global:
+    return "global";
+  case mlir::frisk::attr::MemorySpace::Shared:
+    return "shared";
+  }
+  return "unknown";
+}
 
+static bool runGemmLayoutCase(MLIRContext &context, StringRef caseLabel,
+                              StringRef target,
+                              mlir::frisk::attr::MemorySpace spaceA,
+                              mlir::frisk::attr::MemorySpace spaceB) {
   OpBuilder moduleBuilder(&context);
   auto loc = moduleBuilder.getUnknownLoc();
-
   OwningOpRef<ModuleOp> module(ModuleOp::create(loc));
-  module->getOperation()->setAttr("frisk.target", moduleBuilder.getStringAttr("sm_80"));
+  module->getOperation()->setAttr("frisk.target",
+                                  moduleBuilder.getStringAttr(target));
 
   auto f16 = moduleBuilder.getF16Type();
-  auto sharedSpace = moduleBuilder.getI64IntegerAttr(
-      static_cast<int64_t>(mlir::frisk::attr::MemorySpace::Shared));
-  auto localSpace = moduleBuilder.getI64IntegerAttr(
-      static_cast<int64_t>(mlir::frisk::attr::MemorySpace::Local));
-
+  auto makeSpaceAttr = [&](mlir::frisk::attr::MemorySpace space) {
+    return moduleBuilder.getI64IntegerAttr(static_cast<int64_t>(space));
+  };
   auto memAType =
-      MemRefType::get({128, 64}, f16, AffineMapAttr(), sharedSpace);
+      MemRefType::get({128, 64}, f16, AffineMapAttr(), makeSpaceAttr(spaceA));
   auto memBType =
-      MemRefType::get({64, 128}, f16, AffineMapAttr(), sharedSpace);
-  auto memCType =
-      MemRefType::get({128, 128}, f16, AffineMapAttr(), localSpace);
+      MemRefType::get({64, 128}, f16, AffineMapAttr(), makeSpaceAttr(spaceB));
+  auto memCType = MemRefType::get({128, 128}, f16, AffineMapAttr(),
+                                  makeSpaceAttr(mlir::frisk::attr::MemorySpace::Local));
 
   auto funcType =
       moduleBuilder.getFunctionType({memAType, memBType, memCType}, {});
-
   Block &moduleBlock = module->getBodyRegion().front();
   moduleBuilder.setInsertionPointToStart(&moduleBlock);
   auto kernel =
-      moduleBuilder.create<mlir::frisk::KernelOp>(loc, "test", funcType);
-
+      moduleBuilder.create<mlir::frisk::KernelOp>(loc, caseLabel, funcType);
   Block *entry = kernel.addEntryBlock();
 
   OpBuilder bodyBuilder(&context);
@@ -185,46 +194,64 @@ bool testGemmLayoutInference(MLIRContext &context) {
       mlir::frisk::attr::GemmWarpPolicy::Square, false);
   gemm->setAttr("frisk.threads", bodyBuilder.getI64IntegerAttr(128));
 
-  mlir::frisk::GemmOp target;
-  module->walk([&](mlir::frisk::GemmOp op) { target = op; });
-  if (!target) {
-    llvm::errs() << "No GemmOp found in test module\n";
-    return false;
-  }
+  llvm::outs() << "\nCase '" << caseLabel << "' (target=" << target
+               << ", A=" << describeMemorySpace(spaceA)
+               << ", B=" << describeMemorySpace(spaceB) << ")\n";
 
-  printHeader("Constructed Module IR");
   module->print(llvm::outs());
-  llvm::outs() << "\n";
 
   OpBuilder builder(&context);
-  builder.setInsertionPoint(target);
+  builder.setInsertionPoint(gemm);
   llvm::DenseMap<Value, Attribute> layoutMap;
-  if (failed(target.inferLayout(builder, layoutMap))) {
-    llvm::errs() << "inferLayout returned failure\n";
+  if (failed(gemm.inferLayout(builder, layoutMap))) {
+    llvm::errs() << "inferLayout returned failure for case '" << caseLabel
+                 << "'\n";
     return false;
   }
 
   auto checkOperand = [&](Value value, StringRef label) -> bool {
     auto it = layoutMap.find(value);
     if (it == layoutMap.end()) {
-      llvm::errs() << "Missing layout for operand " << label << "\n";
+      llvm::errs() << "Missing layout for operand " << label << "";
       return false;
     }
     auto layout = dyn_cast<mlir::frisk::LayoutAttr>(it->second);
     if (!layout) {
-      llvm::errs() << "Layout for operand " << label << " has wrong type\n";
+      llvm::errs() << "Layout for operand " << label << " has wrong type";
       return false;
     }
-    llvm::outs() << label << " layout forward map: ";
-    dumpAttribute(layout.getForwardIndex());
-    llvm::outs() << "\n";
+    llvm::outs() << label << " layout: "
+                 << mlir::frisk::layoutDebugString(layout) << "\n";
     return true;
   };
-
   bool ok = true;
-  ok &= checkOperand(target.getA(), "A");
-  ok &= checkOperand(target.getB(), "B");
-  ok &= checkOperand(target.getC(), "C");
+  ok &= checkOperand(gemm.getA(), "A");
+  ok &= checkOperand(gemm.getB(), "B");
+  ok &= checkOperand(gemm.getC(), "C");
+  return ok;
+}
+
+bool testGemmLayoutInference(MLIRContext &context) {
+  printHeader("Gemm Layout Inference");
+  bool ok = true;
+  ok &= runGemmLayoutCase(context, "sm80_ss", "sm_80",
+                          mlir::frisk::attr::MemorySpace::Shared,
+                          mlir::frisk::attr::MemorySpace::Shared);
+  llvm::outs() << std::string(60, '-') << "\n";
+
+  ok &= runGemmLayoutCase(context, "sm80_rs", "sm_80",
+    mlir::frisk::attr::MemorySpace::Local,
+    mlir::frisk::attr::MemorySpace::Shared);
+  llvm::outs() << std::string(60, '-') << "\n";
+
+  ok &= runGemmLayoutCase(context, "sm80_sr", "sm_80",
+    mlir::frisk::attr::MemorySpace::Shared,
+    mlir::frisk::attr::MemorySpace::Local);
+  llvm::outs() << std::string(60, '-') << "\n";
+
+  ok &= runGemmLayoutCase(context, "sm90_ss", "sm_90",
+                          mlir::frisk::attr::MemorySpace::Shared,
+                          mlir::frisk::attr::MemorySpace::Shared);
   return ok;
 }
 
