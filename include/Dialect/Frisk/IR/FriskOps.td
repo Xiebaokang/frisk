@@ -130,6 +130,9 @@ def Frisk_ParallelOp : Frisk_Op<"parallel", [Pure, HasParent<"KernelOp">, Implic
       builder.create<EndOp>(getLoc());
       return entry;
     }
+
+    ::mlir::LogicalResult inferLayout(::mlir::OpBuilder &builder,
+                                      llvm::DenseMap<::mlir::Value, ::mlir::Attribute> &layoutMap);
   }];
 
   let hasVerifier = 0;

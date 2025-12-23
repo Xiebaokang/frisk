@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/ADT/StringRef.h"
 #include "mlir/IR/AffineExpr.h"
@@ -15,6 +16,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Interfaces/FunctionImplementation.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/IR/Visitors.h"
 
 #include "Dialect/Frisk/IR/FriskDialect.h"
 #include "Dialect/Frisk/IR/FriskAttributes.h"
@@ -35,6 +37,8 @@ namespace frisk {
 
 namespace mlir {
 namespace frisk {
+
+class GemmOp;
 
 namespace {
 
@@ -699,6 +703,125 @@ static LayoutAttr buildFragmentLayoutAttr(OpBuilder &builder,
   return LayoutAttr::get(ctx, shapeAttr, indexMap, threadMap, replicate);
 }
 
+static std::optional<int64_t> tryComputeStaticElementCount(MemRefType type) {
+  int64_t total = 1;
+  for (int64_t dim : type.getShape()) {
+    if (dim < 0)
+      return std::nullopt;
+    total *= dim;
+  }
+  return total;
+}
+
+static LayoutAttr buildDefaultLinearLayout(OpBuilder &builder, MemRefType type,
+                                           bool attachThreadMap) {
+  ArrayRef<int64_t> shape = type.getShape();
+  for (int64_t dim : shape) {
+    if (dim < 0)
+      return LayoutAttr();
+  }
+  SmallVector<int64_t> dims(shape.begin(), shape.end());
+  if (dims.empty())
+    dims.push_back(1);
+  auto shapeAttr = builder.getDenseI64ArrayAttr(dims);
+  MLIRContext *ctx = builder.getContext();
+  AffineExpr expr = builder.getAffineConstantExpr(0);
+  if (!dims.empty()) {
+    int64_t stride = 1;
+    for (int64_t dim = static_cast<int64_t>(dims.size()) - 1; dim >= 0; --dim) {
+      AffineExpr dimExpr = builder.getAffineDimExpr(dim);
+      expr = expr + dimExpr * builder.getAffineConstantExpr(stride);
+      int64_t size = std::max<int64_t>(1, dims[dim]);
+      stride *= size;
+    }
+  }
+  auto indexMap =
+      AffineMapAttr::get(AffineMap::get(dims.size(), 0, expr, ctx));
+  AffineMapAttr threadMap;
+  if (attachThreadMap) {
+    AffineExpr lane = builder.getAffineConstantExpr(0);
+    threadMap =
+        AffineMapAttr::get(AffineMap::get(dims.size(), 0, lane, ctx));
+  }
+  return LayoutAttr::get(ctx, shapeAttr, indexMap, threadMap, IntegerAttr());
+}
+
+static LayoutAttr attachReplicate(LayoutAttr layout, OpBuilder &builder,
+                                  int64_t replicate) {
+  if (!layout || replicate <= 1)
+    return layout;
+  return LayoutAttr::get(layout.getContext(), layout.getInputShape(),
+                         layout.getForwardIndex(), layout.getForwardThread(),
+                         builder.getI64IntegerAttr(replicate));
+}
+
+static LayoutAttr inferSharedLayoutForType(OpBuilder &builder,
+                                           MemRefType type) {
+  LayoutAttr layout = buildSharedLayoutForType(builder, type,
+                                               /*transpose=*/false);
+  if (!layout)
+    layout = buildDefaultLinearLayout(builder, type,
+                                      /*attachThreadMap=*/false);
+  return layout;
+}
+
+static LayoutAttr inferFragmentLayoutForType(OpBuilder &builder,
+                                             MemRefType type,
+                                             const TargetInfo *targetInfo) {
+  unsigned warpSize = targetInfo ? targetInfo->warpSize : 32;
+  LayoutAttr layout;
+  auto maybeShape = extractMatrixShape(type);
+  if (succeeded(maybeShape)) {
+    int64_t tileRows = (*maybeShape)[0];
+    int64_t tileCols = (*maybeShape)[1];
+    layout =
+        buildFragmentLayoutAttr(builder, type, tileRows, tileCols, warpSize);
+  }
+  if (!layout)
+    layout = buildDefaultLinearLayout(builder, type,
+                                      /*attachThreadMap=*/true);
+  return layout;
+}
+
+static bool valueHandledBySpecializedInference(Value buffer) {
+  return llvm::any_of(buffer.getUsers(), [](Operation *user) {
+    return isa<GemmOp>(user);
+  });
+}
+
+static LayoutAttr inferLayoutForAllocBuffer(OpBuilder &builder,
+                                            AllocBufferOp alloc,
+                                            const TargetInfo *targetInfo,
+                                            int64_t threadCount) {
+  auto memType = dyn_cast<MemRefType>(alloc.getResult().getType());
+  if (!memType)
+    return LayoutAttr();
+
+  LayoutAttr layout;
+  switch (alloc.getMemorySpace()) {
+  case attr::MemorySpace::Shared:
+    layout = inferSharedLayoutForType(builder, memType);
+    break;
+  case attr::MemorySpace::Local:
+    layout = inferFragmentLayoutForType(builder, memType, targetInfo);
+    break;
+  case attr::MemorySpace::Global:
+  default:
+    layout = buildDefaultLinearLayout(builder, memType,
+                                      /*attachThreadMap=*/false);
+    break;
+  }
+  if (!layout)
+    return LayoutAttr();
+
+  if (auto elements = tryComputeStaticElementCount(memType)) {
+    if (*elements == 1)
+      layout = attachReplicate(
+          layout, builder, std::max<int64_t>(int64_t(1), threadCount));
+  }
+  return layout;
+}
+
 static std::pair<int64_t, int64_t>
 computeWarpPartition(attr::GemmWarpPolicy policy, int64_t M, int64_t N,
                      int64_t blockSize, const TargetInfo &target) {
@@ -912,6 +1035,60 @@ void ParallelOp::print(OpAsmPrinter &p) {
   // 打印区域（不打印终止符）
   p << " ";
   p.printRegion(getRegion(), /*printEntryBlockArgs=*/false, /*printBlockTerminators=*/false);
+}
+
+LogicalResult ParallelOp::inferLayout(OpBuilder &builder,
+                                      DenseMap<Value, Attribute> &layoutMap) {
+  bool updated = false;
+  auto targetInfo = detectTargetInfo(getOperation());
+  int64_t threadCount = getThreadNum();
+
+  // Seed layouts for buffers that do not have a dedicated inference routine.
+  getRegion().walk([&](AllocBufferOp alloc) {
+    if (auto parent = alloc->getParentOfType<ParallelOp>())
+      if (parent != *this)
+        return;
+    Value buffer = alloc.getResult();
+    if (layoutMap.count(buffer))
+      return;
+    if (valueHandledBySpecializedInference(buffer))
+      return;
+    LayoutAttr layout =
+        inferLayoutForAllocBuffer(builder, alloc,
+                                  targetInfo ? &*targetInfo : nullptr,
+                                  threadCount);
+    if (!layout)
+      return;
+    if (layoutMap.try_emplace(buffer, layout).second)
+      updated = true;
+  });
+
+  WalkResult walkResult =
+      getRegion().walk([&](Operation *nested) -> WalkResult {
+        if (auto innerParallel = dyn_cast<ParallelOp>(nested)) {
+          if (innerParallel == *this)
+            return WalkResult::advance();
+          OpBuilder::InsertionGuard guard(builder);
+          builder.setInsertionPoint(innerParallel);
+          auto result = innerParallel.inferLayout(builder, layoutMap);
+          if (failed(result))
+            return WalkResult::interrupt();
+          updated |= succeeded(result);
+          return WalkResult::skip();
+        }
+        if (auto gemm = dyn_cast<GemmOp>(nested)) {
+          OpBuilder::InsertionGuard guard(builder);
+          builder.setInsertionPoint(gemm);
+          auto result = gemm.inferLayout(builder, layoutMap);
+          if (failed(result))
+            return WalkResult::interrupt();
+          updated |= succeeded(result);
+        }
+        return WalkResult::advance();
+      });
+  if (walkResult.wasInterrupted())
+    return failure();
+  return success(updated);
 }
 
 //===----------------------------------------------------------------------===//

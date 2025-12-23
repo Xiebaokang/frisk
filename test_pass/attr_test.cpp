@@ -252,6 +252,11 @@ bool testGemmLayoutInference(MLIRContext &context) {
   ok &= runGemmLayoutCase(context, "sm90_ss", "sm_90",
                           mlir::frisk::attr::MemorySpace::Shared,
                           mlir::frisk::attr::MemorySpace::Shared);
+  llvm::outs() << std::string(60, '-') << "\n";
+
+  ok &= runGemmLayoutCase(context, "sm90_rs", "sm_90",
+    mlir::frisk::attr::MemorySpace::Local,
+    mlir::frisk::attr::MemorySpace::Shared);
   return ok;
 }
 

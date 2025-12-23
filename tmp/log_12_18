@@ -1,0 +1,82 @@
+
+============================================================
+-- MemorySpaceAttr --
+------------------------------------------------------------
+Constructed: #frisk<memory_space Local> (enum = 0)
+Constructed: #frisk<memory_space Global> (enum = 1)
+Constructed: #frisk<memory_space Shared> (enum = 3)
+Parsed: #frisk<memory_space Shared> -> enum = 3
+
+============================================================
+-- GemmWarpPolicyAttr --
+------------------------------------------------------------
+Constructed: #frisk<gemm_warp_policy Square> (enum = 0)
+Constructed: #frisk<gemm_warp_policy FullRow> (enum = 1)
+Constructed: #frisk<gemm_warp_policy FullCol> (enum = 2)
+Parsed: #frisk<gemm_warp_policy FullRow> -> enum = 1
+
+============================================================
+-- LayoutAttr --
+------------------------------------------------------------
+Constructed layout: #frisk.layout<[4, 4], affine_map<(d0, d1) -> (d0 * 4 + d1)>>
+
+============================================================
+-- Gemm Layout Inference --
+------------------------------------------------------------
+
+Case 'sm80_ss' (target=sm_80, A=shared, B=shared)
+module attributes {frisk.target = "sm_80"} {
+  frisk.kernel @sm80_ss(memref<128x64xf16, 3>, memref<64x128xf16, 3>, memref<128x128xf16>) {
+    frisk.gemm(%arg0, %arg1, %arg2) {K = 64 : i64, M = 128 : i64, N = 128 : i64, clear_accum = false, frisk.threads = 128 : i64, policy = #frisk<gemm_warp_policy Square>, transA = false, transB = false} : memref<128x64xf16, 3>, memref<64x128xf16, 3>, memref<128x128xf16>
+  }
+}
+A layout: Layout(shape=[128, 64], index=affine_map<(d0, d1) -> ((d1 floordiv 8) floordiv 8, d0 floordiv 8, d1 mod 8 + (((((((d1 floordiv 8) mod 8) floordiv 2) floordiv 2 + ((d0 mod 8) floordiv 2) floordiv 2) mod 2) * 2 + ((((d1 floordiv 8) mod 8) floordiv 2) mod 2 + ((d0 mod 8) floordiv 2) mod 2) mod 2) * 2 + ((d1 floordiv 8) mod 2 + d0 mod 2) mod 2 + (d0 mod 8) * 8) * 8)>)
+B layout: Layout(shape=[64, 128], index=affine_map<(d0, d1) -> ((d1 floordiv 8) floordiv 8, d0 floordiv 8, d1 mod 8 + (((((((d1 floordiv 8) mod 8) floordiv 2) floordiv 2 + ((d0 mod 8) floordiv 2) floordiv 2) mod 2) * 2 + ((((d1 floordiv 8) mod 8) floordiv 2) mod 2 + ((d0 mod 8) floordiv 2) mod 2) mod 2) * 2 + ((d1 floordiv 8) mod 2 + d0 mod 2) mod 2 + (d0 mod 8) * 8) * 8)>)
+C layout: Fragment(shape=[128, 128], index=affine_map<(d0, d1) -> (d1 mod 2 + ((d1 mod 8) floordiv 8 + (d0 mod 16) floordiv 8) * 2 + (d0 floordiv 32 + (d1 floordiv 16) * 4) * 4)>, thread=affine_map<(d0, d1) -> ((d1 mod 8) floordiv 2 + (d0 mod 8) * 4 + ((d0 mod 32) floordiv 16 + ((d1 mod 16) floordiv 8) * 2) * 32)>, replicate=1)
+------------------------------------------------------------
+
+Case 'sm80_rs' (target=sm_80, A=local, B=shared)
+module attributes {frisk.target = "sm_80"} {
+  frisk.kernel @sm80_rs(memref<128x64xf16>, memref<64x128xf16, 3>, memref<128x128xf16>) {
+    frisk.gemm(%arg0, %arg1, %arg2) {K = 64 : i64, M = 128 : i64, N = 128 : i64, clear_accum = false, frisk.threads = 128 : i64, policy = #frisk<gemm_warp_policy Square>, transA = false, transB = false} : memref<128x64xf16>, memref<64x128xf16, 3>, memref<128x128xf16>
+  }
+}
+A layout: Fragment(shape=[128, 64], index=affine_map<(d0, d1) -> (d1 mod 2 + ((d0 mod 16) floordiv 8 + ((d1 mod 16) floordiv 8) * 2) * 2 + (d0 floordiv 32 + (d1 floordiv 16) * 4) * 8)>, thread=affine_map<(d0, d1) -> ((d1 mod 8) floordiv 2 + (d0 mod 8) * 4 + ((d1 mod 16) floordiv 16 + (d0 mod 32) floordiv 16) * 32)>, replicate=2)
+B layout: Layout(shape=[64, 128], index=affine_map<(d0, d1) -> ((d1 floordiv 8) floordiv 8, d0 floordiv 8, d1 mod 8 + (((((((d1 floordiv 8) mod 8) floordiv 2) floordiv 2 + ((d0 mod 8) floordiv 2) floordiv 2) mod 2) * 2 + ((((d1 floordiv 8) mod 8) floordiv 2) mod 2 + ((d0 mod 8) floordiv 2) mod 2) mod 2) * 2 + ((d1 floordiv 8) mod 2 + d0 mod 2) mod 2 + (d0 mod 8) * 8) * 8)>)
+C layout: Fragment(shape=[128, 128], index=affine_map<(d0, d1) -> (d1 mod 2 + ((d1 mod 8) floordiv 8 + (d0 mod 16) floordiv 8) * 2 + (d0 floordiv 32 + (d1 floordiv 16) * 4) * 4)>, thread=affine_map<(d0, d1) -> ((d1 mod 8) floordiv 2 + (d0 mod 8) * 4 + ((d0 mod 32) floordiv 16 + ((d1 mod 16) floordiv 8) * 2) * 32)>, replicate=1)
+------------------------------------------------------------
+
+Case 'sm80_sr' (target=sm_80, A=shared, B=local)
+module attributes {frisk.target = "sm_80"} {
+  frisk.kernel @sm80_sr(memref<128x64xf16, 3>, memref<64x128xf16>, memref<128x128xf16>) {
+    frisk.gemm(%arg0, %arg1, %arg2) {K = 64 : i64, M = 128 : i64, N = 128 : i64, clear_accum = false, frisk.threads = 128 : i64, policy = #frisk<gemm_warp_policy Square>, transA = false, transB = false} : memref<128x64xf16, 3>, memref<64x128xf16>, memref<128x128xf16>
+  }
+}
+A layout: Layout(shape=[128, 64], index=affine_map<(d0, d1) -> ((d1 floordiv 8) floordiv 8, d0 floordiv 8, d1 mod 8 + (((((((d1 floordiv 8) mod 8) floordiv 2) floordiv 2 + ((d0 mod 8) floordiv 2) floordiv 2) mod 2) * 2 + ((((d1 floordiv 8) mod 8) floordiv 2) mod 2 + ((d0 mod 8) floordiv 2) mod 2) mod 2) * 2 + ((d1 floordiv 8) mod 2 + d0 mod 2) mod 2 + (d0 mod 8) * 8) * 8)>)
+B layout: Fragment(shape=[64, 128], index=affine_map<(d0, d1) -> (d0 mod 2 + ((d0 mod 16) floordiv 8 + ((d1 mod 8) floordiv 8) * 2) * 2 + (d1 floordiv 16 + (d0 floordiv 16) * 8) * 4)>, thread=affine_map<(d0, d1) -> ((d0 mod 8) floordiv 2 + (d1 mod 8) * 4 + ((d1 mod 16) floordiv 8 + ((d0 mod 16) floordiv 16) * 2) * 32)>, replicate=2)
+C layout: Fragment(shape=[128, 128], index=affine_map<(d0, d1) -> (d1 mod 2 + ((d1 mod 8) floordiv 8 + (d0 mod 16) floordiv 8) * 2 + (d0 floordiv 32 + (d1 floordiv 16) * 4) * 4)>, thread=affine_map<(d0, d1) -> ((d1 mod 8) floordiv 2 + (d0 mod 8) * 4 + ((d0 mod 32) floordiv 16 + ((d1 mod 16) floordiv 8) * 2) * 32)>, replicate=1)
+------------------------------------------------------------
+
+Case 'sm90_ss' (target=sm_90, A=shared, B=shared)
+module attributes {frisk.target = "sm_90"} {
+  frisk.kernel @sm90_ss(memref<128x64xf16, 3>, memref<64x128xf16, 3>, memref<128x128xf16>) {
+    frisk.gemm(%arg0, %arg1, %arg2) {K = 64 : i64, M = 128 : i64, N = 128 : i64, clear_accum = false, frisk.threads = 128 : i64, policy = #frisk<gemm_warp_policy Square>, transA = false, transB = false} : memref<128x64xf16, 3>, memref<64x128xf16, 3>, memref<128x128xf16>
+  }
+}
+A layout: Layout(shape=[128, 64], index=affine_map<(d0, d1) -> ((d1 floordiv 8) floordiv 8, d0 floordiv 8, d1 mod 8 + (((((((d1 floordiv 8) mod 8) floordiv 2) floordiv 2 + ((d0 mod 8) floordiv 2) floordiv 2) mod 2) * 2 + ((((d1 floordiv 8) mod 8) floordiv 2) mod 2 + ((d0 mod 8) floordiv 2) mod 2) mod 2) * 2 + ((d1 floordiv 8) mod 2 + d0 mod 2) mod 2 + (d0 mod 8) * 8) * 8)>)
+B layout: Layout(shape=[64, 128], index=affine_map<(d0, d1) -> ((d1 floordiv 8) floordiv 8, d0 floordiv 8, d1 mod 8 + (((((((d1 floordiv 8) mod 8) floordiv 2) floordiv 2 + ((d0 mod 8) floordiv 2) floordiv 2) mod 2) * 2 + ((((d1 floordiv 8) mod 8) floordiv 2) mod 2 + ((d0 mod 8) floordiv 2) mod 2) mod 2) * 2 + ((d1 floordiv 8) mod 2 + d0 mod 2) mod 2 + (d0 mod 8) * 8) * 8)>)
+C layout: Fragment(shape=[128, 128], index=affine_map<(d0, d1) -> (d1 mod 2 + ((d0 mod 16) floordiv 8 + ((d1 mod 64) floordiv 8) * 2) * 2 + (d0 floordiv 32 + (d1 floordiv 128) * 4) * 32)>, thread=affine_map<(d0, d1) -> ((d1 mod 8) floordiv 2 + (d0 mod 8) * 4 + ((d0 mod 32) floordiv 16 + ((d1 mod 128) floordiv 64) * 2) * 32)>, replicate=1)
+------------------------------------------------------------
+
+Case 'sm90_rs' (target=sm_90, A=local, B=shared)
+module attributes {frisk.target = "sm_90"} {
+  frisk.kernel @sm90_rs(memref<128x64xf16>, memref<64x128xf16, 3>, memref<128x128xf16>) {
+    frisk.gemm(%arg0, %arg1, %arg2) {K = 64 : i64, M = 128 : i64, N = 128 : i64, clear_accum = false, frisk.threads = 128 : i64, policy = #frisk<gemm_warp_policy Square>, transA = false, transB = false} : memref<128x64xf16>, memref<64x128xf16, 3>, memref<128x128xf16>
+  }
+}
+A layout: Fragment(shape=[128, 64], index=affine_map<(d0, d1) -> (d1 mod 2 + ((d0 mod 16) floordiv 8 + ((d1 mod 16) floordiv 8) * 2) * 2 + (d0 floordiv 32 + (d1 floordiv 16) * 4) * 8)>, thread=affine_map<(d0, d1) -> ((d1 mod 8) floordiv 2 + (d0 mod 8) * 4 + ((d1 mod 16) floordiv 16 + (d0 mod 32) floordiv 16) * 32)>, replicate=2)
+B layout: Layout(shape=[64, 128], index=affine_map<(d0, d1) -> ((d1 floordiv 8) floordiv 8, d0 floordiv 8, d1 mod 8 + (((((((d1 floordiv 8) mod 8) floordiv 2) floordiv 2 + ((d0 mod 8) floordiv 2) floordiv 2) mod 2) * 2 + ((((d1 floordiv 8) mod 8) floordiv 2) mod 2 + ((d0 mod 8) floordiv 2) mod 2) mod 2) * 2 + ((d1 floordiv 8) mod 2 + d0 mod 2) mod 2 + (d0 mod 8) * 8) * 8)>)
+C layout: Fragment(shape=[128, 128], index=affine_map<(d0, d1) -> (d1 mod 2 + ((d0 mod 16) floordiv 8 + ((d1 mod 64) floordiv 8) * 2) * 2 + (d0 floordiv 32 + (d1 floordiv 128) * 4) * 32)>, thread=affine_map<(d0, d1) -> ((d1 mod 8) floordiv 2 + (d0 mod 8) * 4 + ((d0 mod 32) floordiv 16 + ((d1 mod 128) floordiv 64) * 2) * 32)>, replicate=1)
+
+============================================================
+All Frisk attributes are usable.

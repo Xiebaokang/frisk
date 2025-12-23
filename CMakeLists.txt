@@ -63,6 +63,7 @@ include_directories(${PROJECT_BINARY_DIR}/include)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/lib)
 
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/exp)
 
 # python
 include(${PROJECT_SOURCE_DIR}/cmake/QueryPythonForPybind11.cmake)

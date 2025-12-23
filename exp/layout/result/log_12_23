@@ -1,0 +1,75 @@
+{
+  "config": {
+    "block_shape": {
+      "K": 64,
+      "M": 128,
+      "N": 128
+    },
+    "dtype": "fp16",
+    "grid": [
+      2,
+      2
+    ],
+    "memory_spaces": {
+      "A": "Shared",
+      "B": "Shared",
+      "C": "Local"
+    },
+    "target": "sm_80",
+    "threads": 128
+  },
+  "layouts": [
+    {
+      "bank_stats": {
+        "avg_max_conflict": 2,
+        "max_conflict": 2,
+        "samples": 256
+      },
+      "baseline_row_major": {
+        "avg_max_conflict": 2,
+        "max_conflict": 2,
+        "samples": 256
+      },
+      "element_bits": 16,
+      "forward_index": "affine_map<(d0, d1) -> ((d1 floordiv 8) floordiv 8, d0 floordiv 8, d1 mod 8 + (((((((d1 floordiv 8) mod 8) floordiv 2) floordiv 2 + ((d0 mod 8) floordiv 2) floordiv 2) mod 2) * 2 + ((((d1 floordiv 8) mod 8) floordiv 2) mod 2 + ((d0 mod 8) floordiv 2) mod 2) mod 2) * 2 + ((d1 floordiv 8) mod 2 + d0 mod 2) mod 2 + (d0 mod 8) * 8) * 8)>",
+      "memory_space": "Shared",
+      "operand": "A",
+      "shape": [
+        128,
+        64
+      ]
+    },
+    {
+      "bank_stats": {
+        "avg_max_conflict": 2,
+        "max_conflict": 2,
+        "samples": 256
+      },
+      "baseline_row_major": {
+        "avg_max_conflict": 2,
+        "max_conflict": 2,
+        "samples": 256
+      },
+      "element_bits": 16,
+      "forward_index": "affine_map<(d0, d1) -> ((d1 floordiv 8) floordiv 8, d0 floordiv 8, d1 mod 8 + (((((((d1 floordiv 8) mod 8) floordiv 2) floordiv 2 + ((d0 mod 8) floordiv 2) floordiv 2) mod 2) * 2 + ((((d1 floordiv 8) mod 8) floordiv 2) mod 2 + ((d0 mod 8) floordiv 2) mod 2) mod 2) * 2 + ((d1 floordiv 8) mod 2 + d0 mod 2) mod 2 + (d0 mod 8) * 8) * 8)>",
+      "memory_space": "Shared",
+      "operand": "B",
+      "shape": [
+        64,
+        128
+      ]
+    },
+    {
+      "element_bits": 16,
+      "forward_index": "affine_map<(d0, d1) -> (d1 mod 2 + ((d1 mod 8) floordiv 8 + (d0 mod 16) floordiv 8) * 2 + (d0 floordiv 32 + (d1 floordiv 16) * 4) * 4)>",
+      "forward_thread": "affine_map<(d0, d1) -> ((d1 mod 8) floordiv 2 + (d0 mod 8) * 4 + ((d0 mod 32) floordiv 16 + ((d1 mod 16) floordiv 8) * 2) * 32)>",
+      "memory_space": "Global",
+      "operand": "C",
+      "replicate": 1,
+      "shape": [
+        128,
+        128
+      ]
+    }
+  ]
+}

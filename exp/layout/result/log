@@ -1,0 +1,24 @@
+== Config ==
+target      : sm_80
+shape       : M=256 N=128 K=64
+dtype       : fp16
+threads     : 128
+lane vector : 4 (ldmatrix)
+lane vector : 4 (ldmatrix=True)
+grid        : [1, 1]
+spaces      : A=Shared, B=Shared, C=Local
+
+Operand A (Shared):
+  layout index     : affine_map<(d0, d1) -> ((d1 floordiv 8) floordiv 8, d0 floordiv 8, d1 mod 8 + (((((((d1 floordiv 8) mod 8) floordiv 2) floordiv 2 + ((d0 mod 8) floordiv 2) floordiv 2) mod 2) * 2 + ((((d1 floordiv 8) mod 8) floordiv 2) mod 2 + ((d0 mod 8) floordiv 2) mod 2) mod 2) * 2 + ((d1 floordiv 8) mod 2 + d0 mod 2) mod 2 + (d0 mod 8) * 8) * 8)>
+  bank stats       : avg_max=2.00  max=2
+  baseline (torch) : avg_max=2.00  max=2
+
+Operand B (Shared):
+  layout index     : affine_map<(d0, d1) -> ((d1 floordiv 8) floordiv 8, d0 floordiv 8, d1 mod 8 + (((((((d1 floordiv 8) mod 8) floordiv 2) floordiv 2 + ((d0 mod 8) floordiv 2) floordiv 2) mod 2) * 2 + ((((d1 floordiv 8) mod 8) floordiv 2) mod 2 + ((d0 mod 8) floordiv 2) mod 2) mod 2) * 2 + ((d1 floordiv 8) mod 2 + d0 mod 2) mod 2 + (d0 mod 8) * 8) * 8)>
+  bank stats       : avg_max=4.00  max=4
+  baseline (torch) : avg_max=4.00  max=4
+
+Operand C (Global):
+  layout index     : affine_map<(d0, d1) -> (d1 mod 2 + ((d1 mod 8) floordiv 8 + (d0 mod 16) floordiv 8) * 2 + (d0 floordiv 32 + (d1 floordiv 16) * 8) * 4)>
+
+PyTorch baseline throughput: 0.97 TFLOPS (device: NVIDIA GeForce RTX 4060 Ti)
