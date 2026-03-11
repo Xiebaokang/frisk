@@ -260,6 +260,87 @@ bool testGemmLayoutInference(MLIRContext &context) {
   return ok;
 }
 
+mlir::frisk::LayoutAttr buildSimpleFragmentLayout(OpBuilder &builder,
+                                                  MemRefType type) {
+  MLIRContext *ctx = builder.getContext();
+  auto shapeAttr = builder.getDenseI64ArrayAttr(type.getShape());
+  AffineExpr expr = builder.getAffineConstantExpr(0);
+  int64_t stride = 1;
+  for (int64_t dim = static_cast<int64_t>(type.getRank()) - 1; dim >= 0;
+       --dim) {
+    expr = expr + builder.getAffineDimExpr(dim) *
+                      builder.getAffineConstantExpr(stride);
+    int64_t size = std::max<int64_t>(1, type.getDimSize(dim));
+    stride *= size;
+  }
+  auto indexMap = AffineMap::get(type.getRank(), 0, expr, ctx);
+  auto threadExpr =
+      builder.getAffineDimExpr(std::max<int64_t>(0, type.getRank() - 1));
+  auto threadMap = AffineMap::get(type.getRank(), 0, threadExpr, ctx);
+  return mlir::frisk::LayoutAttr::get(ctx, shapeAttr,
+                                      AffineMapAttr::get(indexMap),
+                                      AffineMapAttr::get(threadMap),
+                                      builder.getI64IntegerAttr(1));
+}
+
+bool testReduceLayoutInference(MLIRContext &context) {
+  printHeader("Reduce Layout Inference");
+  OpBuilder builder(&context);
+  auto loc = builder.getUnknownLoc();
+
+  auto f16 = builder.getF16Type();
+  auto makeLocalType = [&](ArrayRef<int64_t> shape) -> MemRefType {
+    return MemRefType::get(shape, f16, AffineMapAttr(),
+                           builder.getI64IntegerAttr(static_cast<int64_t>(
+                               mlir::frisk::attr::MemorySpace::Local)));
+  };
+
+  auto srcType = makeLocalType({4, 8, 16});
+  auto dstType = makeLocalType({4, 16});
+
+  auto funcType = builder.getFunctionType({srcType, dstType}, {});
+  auto kernel =
+      builder.create<mlir::frisk::KernelOp>(loc, "reduce_kernel", funcType);
+  Block *entry = kernel.addEntryBlock();
+
+  builder.setInsertionPointToStart(entry);
+  auto reduce = builder.create<mlir::frisk::ReduceOp>(
+      loc, entry->getArgument(0), entry->getArgument(1), "add",
+      static_cast<int64_t>(1), /*clear=*/false);
+  reduce->setAttr("frisk.threads", builder.getI64IntegerAttr(64));
+  builder.create<mlir::frisk::EndOp>(loc);
+
+  DenseMap<Value, Attribute> layoutMap;
+  OpBuilder inferBuilder(&context);
+  inferBuilder.setInsertionPoint(reduce);
+  layoutMap.try_emplace(reduce.getSrc(),
+                        buildSimpleFragmentLayout(inferBuilder, srcType));
+
+  if (failed(reduce.inferLayout(inferBuilder, layoutMap))) {
+    llvm::errs() << "reduce layout inference failed\n";
+    return false;
+  }
+
+  auto it = layoutMap.find(reduce.getDst());
+  if (it == layoutMap.end()) {
+    llvm::errs() << "missing inferred layout for reduce destination\n";
+    return false;
+  }
+  auto dstLayout = dyn_cast<mlir::frisk::LayoutAttr>(it->second);
+  if (!dstLayout) {
+    llvm::errs() << "reduce destination layout has wrong attribute type\n";
+    return false;
+  }
+  if (auto replicate = dstLayout.getReplicateSize())
+    if (replicate.getInt() != 8) {
+      llvm::errs() << "unexpected replicate extent, want 8 got "
+                   << replicate.getInt() << "\n";
+      return false;
+    }
+
+  return true;
+}
+
 } // namespace
 
 int main() {
@@ -273,6 +354,7 @@ int main() {
   success &= testGemmWarpPolicyAttr(context);
   success &= testLayoutAttr(context);
   success &= testGemmLayoutInference(context);
+  success &= testReduceLayoutInference(context);
 
   llvm::outs() << "\n" << std::string(60, '=') << "\n";
   if (success) {

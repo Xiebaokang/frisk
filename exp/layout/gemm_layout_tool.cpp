@@ -165,41 +165,42 @@ std::optional<BankStats> analyzeLayout(LayoutAttr layout, MemRefType type,
   int64_t windowWidth =
       std::max<int64_t>(1, static_cast<int64_t>(warpSize) * laneVector);
   BankStats stats;
+  int64_t totalElements = rows * cols;
   AffineExpr expr = map.getResult(map.getNumResults() - 1);
-  for (int64_t row = 0; row < rows; ++row) {
-    for (int64_t chunk = 0; chunk < cols; chunk += windowWidth) {
-      SmallVector<int64_t> histogram(bankCount, 0);
-      bool anyLane = false;
-      for (int64_t lane = 0; lane < static_cast<int64_t>(warpSize); ++lane) {
-        int64_t baseCol = chunk + lane * laneVector;
-        for (unsigned v = 0; v < laneVector; ++v) {
-          int64_t col = baseCol + static_cast<int64_t>(v);
-          if (col >= cols)
-            break;
-          anyLane = true;
-          llvm::SmallVector<int64_t> dims(map.getNumDims(), 0);
-          // Assume the logical matrix dims occupy the last indices.
-          dims[dims.size() - 2] = row;
-          dims[dims.size() - 1] = col;
-          int64_t index = evaluateAffineExpr(expr, dims);
-          int64_t byteAddress = index * elementBytes;
-          int64_t bank =
-              ((byteAddress / static_cast<int64_t>(bankWidthBytes)) %
-               static_cast<int64_t>(bankCount));
-          if (bank < 0)
-            bank += bankCount;
-          histogram[bank]++;
-        }
+  for (int64_t chunk = 0; chunk < totalElements; chunk += windowWidth) {
+    SmallVector<int64_t> histogram(bankCount, 0);
+    bool anyLane = false;
+    for (int64_t lane = 0; lane < static_cast<int64_t>(warpSize); ++lane) {
+      int64_t baseLinear = chunk + lane * laneVector;
+      for (unsigned v = 0; v < laneVector; ++v) {
+        int64_t linear = baseLinear + static_cast<int64_t>(v);
+        if (linear >= totalElements)
+          break;
+        anyLane = true;
+        int64_t row = linear / cols;
+        int64_t col = linear % cols;
+        llvm::SmallVector<int64_t> dims(map.getNumDims(), 0);
+        // Assume the logical matrix dims occupy the last indices.
+        dims[dims.size() - 2] = row;
+        dims[dims.size() - 1] = col;
+        int64_t index = evaluateAffineExpr(expr, dims);
+        int64_t byteAddress = index * elementBytes;
+        int64_t bank =
+            ((byteAddress / static_cast<int64_t>(bankWidthBytes)) %
+             static_cast<int64_t>(bankCount));
+        if (bank < 0)
+          bank += bankCount;
+        histogram[bank]++;
       }
-      if (!anyLane)
-        continue;
-      stats.samples++;
-      int64_t localMax = 0;
-      for (int64_t count : histogram)
-        localMax = std::max(localMax, count);
-      stats.maxConflicts = std::max(stats.maxConflicts, localMax);
-      stats.avgMaxConflicts += static_cast<double>(localMax);
     }
+    if (!anyLane)
+      continue;
+    stats.samples++;
+    int64_t localMax = 0;
+    for (int64_t count : histogram)
+      localMax = std::max(localMax, count);
+    stats.maxConflicts = std::max(stats.maxConflicts, localMax);
+    stats.avgMaxConflicts += static_cast<double>(localMax);
   }
   if (stats.samples > 0)
     stats.avgMaxConflicts /= static_cast<double>(stats.samples);
@@ -228,36 +229,33 @@ std::optional<BankStats> analyzeRowMajorBaseline(MemRefType type,
   int64_t windowWidth =
       std::max<int64_t>(1, static_cast<int64_t>(warpSize) * laneVector);
   BankStats stats;
-  for (int64_t row = 0; row < rows; ++row) {
-    for (int64_t chunk = 0; chunk < cols; chunk += windowWidth) {
-      SmallVector<int64_t> histogram(bankCount, 0);
-      bool anyLane = false;
-      for (int64_t lane = 0; lane < static_cast<int64_t>(warpSize); ++lane) {
-        int64_t baseCol = chunk + lane * laneVector;
-        for (unsigned v = 0; v < laneVector; ++v) {
-          int64_t col = baseCol + static_cast<int64_t>(v);
-          if (col >= cols)
-            break;
-          anyLane = true;
-          int64_t index = row * cols + col;
-          int64_t byteAddress = index * elementBytes;
-          int64_t bank =
-              ((byteAddress / static_cast<int64_t>(bankWidthBytes)) %
-               static_cast<int64_t>(bankCount));
-          if (bank < 0)
-            bank += bankCount;
-          histogram[bank]++;
-        }
+  int64_t totalElements = rows * cols;
+  for (int64_t chunk = 0; chunk < totalElements; chunk += windowWidth) {
+    SmallVector<int64_t> histogram(bankCount, 0);
+    bool anyLane = false;
+    for (int64_t lane = 0; lane < static_cast<int64_t>(warpSize); ++lane) {
+      int64_t baseLinear = chunk + lane * laneVector;
+      for (unsigned v = 0; v < laneVector; ++v) {
+        int64_t linear = baseLinear + static_cast<int64_t>(v);
+        if (linear >= totalElements)
+          break;
+        anyLane = true;
+        int64_t byteAddress = linear * elementBytes;
+        int64_t bank = ((byteAddress / static_cast<int64_t>(bankWidthBytes)) %
+                        static_cast<int64_t>(bankCount));
+        if (bank < 0)
+          bank += bankCount;
+        histogram[bank]++;
       }
-      if (!anyLane)
-        continue;
-      stats.samples++;
-      int64_t localMax = 0;
-      for (int64_t count : histogram)
-        localMax = std::max(localMax, count);
-      stats.maxConflicts = std::max(stats.maxConflicts, localMax);
-      stats.avgMaxConflicts += static_cast<double>(localMax);
     }
+    if (!anyLane)
+      continue;
+    stats.samples++;
+    int64_t localMax = 0;
+    for (int64_t count : histogram)
+      localMax = std::max(localMax, count);
+    stats.maxConflicts = std::max(stats.maxConflicts, localMax);
+    stats.avgMaxConflicts += static_cast<double>(localMax);
   }
   if (stats.samples > 0)
     stats.avgMaxConflicts /= static_cast<double>(stats.samples);

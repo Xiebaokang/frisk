@@ -432,6 +432,9 @@ def Frisk_ReduceOp: Frisk_Op<"reduce", [Pure]> {
   let extraClassDeclaration = [{
     MemRefType getSrcType() { return cast<MemRefType>(getSrc().getType()); }
     MemRefType getDstType() { return cast<MemRefType>(getDst().getType()); }
+
+    ::mlir::LogicalResult inferLayout(::mlir::OpBuilder &builder,
+                                      llvm::DenseMap<::mlir::Value, ::mlir::Attribute> &layoutMap);
   }];
 
   let hasVerifier = 1;

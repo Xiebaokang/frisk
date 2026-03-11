@@ -7,9 +7,11 @@
     },
     "dtype": "fp16",
     "grid": [
-      2,
-      2
+      1,
+      1
     ],
+    "lane_vector": 8,
+    "ldmatrix_like": false,
     "memory_spaces": {
       "A": "Shared",
       "B": "Shared",
@@ -21,14 +23,14 @@
   "layouts": [
     {
       "bank_stats": {
-        "avg_max_conflict": 2,
-        "max_conflict": 2,
-        "samples": 256
+        "avg_max_conflict": 8,
+        "max_conflict": 8,
+        "samples": 32
       },
       "baseline_row_major": {
-        "avg_max_conflict": 2,
-        "max_conflict": 2,
-        "samples": 256
+        "avg_max_conflict": 8,
+        "max_conflict": 8,
+        "samples": 32
       },
       "element_bits": 16,
       "forward_index": "affine_map<(d0, d1) -> ((d1 floordiv 8) floordiv 8, d0 floordiv 8, d1 mod 8 + (((((((d1 floordiv 8) mod 8) floordiv 2) floordiv 2 + ((d0 mod 8) floordiv 2) floordiv 2) mod 2) * 2 + ((((d1 floordiv 8) mod 8) floordiv 2) mod 2 + ((d0 mod 8) floordiv 2) mod 2) mod 2) * 2 + ((d1 floordiv 8) mod 2 + d0 mod 2) mod 2 + (d0 mod 8) * 8) * 8)>",
@@ -41,14 +43,14 @@
     },
     {
       "bank_stats": {
-        "avg_max_conflict": 2,
-        "max_conflict": 2,
-        "samples": 256
+        "avg_max_conflict": 8,
+        "max_conflict": 8,
+        "samples": 32
       },
       "baseline_row_major": {
-        "avg_max_conflict": 2,
-        "max_conflict": 2,
-        "samples": 256
+        "avg_max_conflict": 8,
+        "max_conflict": 8,
+        "samples": 32
       },
       "element_bits": 16,
       "forward_index": "affine_map<(d0, d1) -> ((d1 floordiv 8) floordiv 8, d0 floordiv 8, d1 mod 8 + (((((((d1 floordiv 8) mod 8) floordiv 2) floordiv 2 + ((d0 mod 8) floordiv 2) floordiv 2) mod 2) * 2 + ((((d1 floordiv 8) mod 8) floordiv 2) mod 2 + ((d0 mod 8) floordiv 2) mod 2) mod 2) * 2 + ((d1 floordiv 8) mod 2 + d0 mod 2) mod 2 + (d0 mod 8) * 8) * 8)>",
