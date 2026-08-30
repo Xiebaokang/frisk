@@ -2,6 +2,7 @@ add_unittest(FriskUnitTests FriskLayoutUnitTests
   BitLinearLayoutTest.cpp
   GF2MatrixTest.cpp
   LayoutInterfaceTest.cpp
+  ProductLayoutTest.cpp
 )
 
 set_target_properties(FriskLayoutUnitTests PROPERTIES

@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++17、LLVM/MLIR ODS/TableGen、MLIR Pass/Dialect Conversion、Affine/Presburger、SCF、MemRef、Tensor、GPU/NVGPU/NVVM、LLVM ADT/APInt、CMake/Ninja、llvm-lit/FileCheck、CTest、CUDA/Nsight 性能工具。
 
-> **执行状态（2026-08-30）：M0 已完成并通过 Gate；下一未完成里程碑为 M1。**
+> **执行状态（2026-08-30）：M0 已完成并通过 Gate；M1 进行中，Task 5–8 已完成，下一任务为 Task 9。**
 
 ## Global Constraints
 
@@ -988,19 +988,22 @@ LayoutProof checkCoverage(Attribute map, ArrayRef<int64_t> logicalShape);
 LayoutProof checkInjectivity(Attribute map, ArrayRef<int64_t> domainShape);
 ```
 
-- [ ] **Step 1: 写 non-power-of-two 与 carry 红灯测试**
+- [x] **Step 1: 写 non-power-of-two 与 carry 红灯测试**
 
-测试 `logical = outer * innerExtent + inner`、shape 6 的 ragged predicate，以及 outer base 未对齐时禁止直接拼接 GF(2) 内层。
+测试概念语义 `logical = outer * innerExtent + inner`；Attr 中将 Affine outer
+规范存为已缩放的 `outer_base = outer * innerExtent`，实际求值为
+`logical = outer_base + inner`。覆盖 shape 6 的 ragged predicate，以及 outer base
+未对齐时禁止直接拼接 GF(2) 内层。
 
 Run: `cmake --build build --target FriskLayoutUnitTests --parallel 32`。
 
 Expected: FAIL，Affine/Product API 尚不存在。
 
-- [ ] **Step 2: 实现 `AffineLayoutMapAttr` verifier**
+- [x] **Step 2: 实现 `AffineLayoutMapAttr` verifier**
 
 检查 AffineMap dim 数、symbol 数、name/extent 数量、正静态 extent 或 `ShapedType::kDynamic`。动态 extent 只允许作为 symbol/bounds，不得进入 BitLinear matrix。
 
-- [ ] **Step 3: 实现 Product compose 和 canonicalization**
+- [x] **Step 3: 实现 Product compose 和 canonicalization**
 
 固定组合流程：
 
@@ -1013,11 +1016,16 @@ Expected: FAIL，Affine/Product API 尚不存在。
 -> canonicalize factor order
 ```
 
-无法证明无 carry 时返回 `ProofStatus::Unknown`，不得生成不安全 Product。
+Product verifier 无法证明无 carry时直接拒绝构造；独立 proof API 对动态/超限情形返回
+`ProofStatus::Unknown`，不得生成不安全 Product，也不得把 `Unknown` 当作成功。
 
-- [ ] **Step 4: 运行枚举 oracle**
+- [x] **Step 4: 运行枚举 oracle**
 
 对每维 extent 不超过 8 的 product map 枚举 `(outer, inner)`，比较 canonical map 与逐层求值；覆盖 transpose、projection、padding、ragged。
+
+实现额外设置 65,536 个 domain point 的硬上限：完整 BitLinear domain 优先使用
+GF(2) rank 精确证明；静态 Affine/Product 仅作为 verifier/测试的有界参考证明，动态、
+含 symbol 或超限时返回 `Unknown`，不得进入 solver 的逐候选热循环。
 
 Run:
 
@@ -1029,7 +1037,7 @@ cmake --build build --target FriskLayoutUnitTests check-frisk --parallel 32
 
 Expected: PASS。
 
-- [ ] **Step 5: 提交组合代数**
+- [x] **Step 5: 提交组合代数**
 
 ```bash
 git add include/Dialect/Frisk lib/Dialect/Frisk test unittests

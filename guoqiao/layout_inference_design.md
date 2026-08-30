@@ -252,6 +252,19 @@ GF(2) 位线性映射非常适合 2 次幂内层 tile、lane/register 分布和 
 logical_i = outer_i * inner_extent_i + inner_i
 ```
 
+在 `ProductLayoutMapAttr` 的实际存储中，Affine outer 的输出采用已经缩放后的
+`outer_base_i = outer_i * inner_extent_i`，因此组合求值固定为：
+
+```text
+logical_i = outer_base_i + inner_i
+```
+
+这种规范避免在 compose/lowering 的每一层重复猜测是否需要乘 split。
+`split_extents[i]` 必须为正的 2 次幂，BitLinear inner 对应输出的 bit width 必须等于
+`log2(split_extents[i])`，并且 verifier 必须证明 Affine outer 的结果恒为
+`split_extents[i]` 的倍数。证明失败（包括动态条件不足）时不得构造 Product；查询动态
+Affine map 的 coverage/injectivity 时返回 `Unknown`，不能把无法证明当成合法。
+
 - `inner_i` 的 extent 是 SM90 指令原子决定的静态 2 次幂，使用 `BitLinearLayoutMapAttr`。
 - `outer_i`、tile permutation、padding 和动态边界使用 `AffineLayoutMapAttr`。
 - `ProductLayoutMapAttr` 负责 direct-sum、compose 和 named-dimension 对齐。
@@ -275,6 +288,12 @@ output 名称分别在各自集合内唯一，compose 通过名称及 bit width 
 - `enumerate`：仅作为小 tile 调试/测试 oracle，不能成为生产求解热路径。
 
 位线性层通过 GF(2) 高斯消元计算 rank、kernel、image、inverse 和等价性，避免对常见 WGMMA/swizzle 调用 Z3。仿射层优先使用 MLIR Affine/Presburger；只有无法证明且确实需要支持的动态外层问题才进入可选 SMT fallback。
+
+M1 的阶段性实现对完整 BitLinear domain 使用秩做精确证明；对静态
+Affine/Product map 提供最多 65,536 个 domain point 的有界参考证明器，超过上限、
+包含 symbol 或无法求值时保守返回 `Unknown`。该路径用于 Attr verifier、单元测试和
+差分 oracle，不得放入候选求解的逐候选热循环；后续接入 Affine/Presburger 证明或
+canonical proof cache 后，solver 才能消费相应结果。
 
 ### 6.4 性能与创新边界
 

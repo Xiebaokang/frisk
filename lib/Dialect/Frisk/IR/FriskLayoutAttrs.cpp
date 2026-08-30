@@ -2,8 +2,11 @@
 
 #include <cstdint>
 #include <limits>
+#include <set>
+#include <vector>
 
 #include "llvm/ADT/StringSet.h"
+#include "llvm/Support/MathExtras.h"
 
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Diagnostics.h"
@@ -152,6 +155,40 @@ FailureOr<GF2Matrix> getIntermediateAlignment(BitLinearLayoutMapAttr lhs,
   return GF2Matrix::get(lhsTotal, rhsTotal, rows);
 }
 
+LogicalResult verifyExtents(function_ref<InFlightDiagnostic()> emitError,
+                            StringRef kind, DenseI64ArrayAttr extents) {
+  for (int64_t extent : extents.asArrayRef()) {
+    if (extent <= 0 && extent != ShapedType::kDynamic)
+      return emitError() << kind
+                         << " extents must be positive or ShapedType::kDynamic";
+  }
+  return success();
+}
+
+std::optional<unsigned> findName(ArrayAttr names, StringRef expected) {
+  for (auto [index, value] : llvm::enumerate(names)) {
+    if (cast<StringAttr>(value).getValue() == expected)
+      return index;
+  }
+  return std::nullopt;
+}
+
+FailureOr<SmallVector<unsigned>>
+getOutputOrder(ArrayAttr available, ArrayRef<StringRef> requested) {
+  llvm::StringSet<> seen;
+  SmallVector<unsigned> order;
+  order.reserve(requested.size());
+  for (StringRef name : requested) {
+    if (!seen.insert(name).second)
+      return failure();
+    std::optional<unsigned> index = findName(available, name);
+    if (!index)
+      return failure();
+    order.push_back(*index);
+  }
+  return order;
+}
+
 } // namespace
 
 Attribute BitLinearLayoutMapAttr::parse(AsmParser &parser, Type) {
@@ -293,6 +330,618 @@ composeBitLinear(BitLinearLayoutMapAttr lhs, BitLinearLayoutMapAttr rhs) {
       lhs.getContext(), rhs.getInputNames(), rhs.getInputBitWidths(),
       lhs.getOutputNames(), lhs.getOutputBitWidths(),
       getDenseMatrix(lhs.getContext(), *composed));
+}
+
+Attribute AffineLayoutMapAttr::parse(AsmParser &parser, Type) {
+  llvm::SMLoc location = parser.getCurrentLocation();
+  ArrayAttr inputNames;
+  DenseI64ArrayAttr inputExtents;
+  ArrayAttr outputNames;
+  DenseI64ArrayAttr outputExtents;
+  AffineMapAttr affineMap;
+
+  if (parser.parseLess() || parser.parseKeyword("inputs") ||
+      parser.parseEqual() || parser.parseAttribute(inputNames) ||
+      parser.parseComma() || parser.parseKeyword("input_extents") ||
+      parser.parseEqual() || parseI64List(parser, inputExtents) ||
+      parser.parseComma() || parser.parseKeyword("outputs") ||
+      parser.parseEqual() || parser.parseAttribute(outputNames) ||
+      parser.parseComma() || parser.parseKeyword("output_extents") ||
+      parser.parseEqual() || parseI64List(parser, outputExtents) ||
+      parser.parseComma() || parser.parseKeyword("map") ||
+      parser.parseEqual() || parser.parseAttribute(affineMap) ||
+      parser.parseGreater())
+    return {};
+
+  return parser.getChecked<AffineLayoutMapAttr>(
+      location, parser.getContext(), inputNames, inputExtents, outputNames,
+      outputExtents, affineMap);
+}
+
+void AffineLayoutMapAttr::print(AsmPrinter &printer) const {
+  printer << "<inputs = " << getInputNames() << ", input_extents = ";
+  printI64List(printer, getInputExtents());
+  printer << ", outputs = " << getOutputNames() << ", output_extents = ";
+  printI64List(printer, getOutputExtents());
+  printer << ", map = " << getAffineMap() << '>';
+}
+
+LogicalResult AffineLayoutMapAttr::verify(
+    function_ref<InFlightDiagnostic()> emitError, ArrayAttr inputNames,
+    DenseI64ArrayAttr inputExtents, ArrayAttr outputNames,
+    DenseI64ArrayAttr outputExtents, AffineMapAttr affineMapAttr) {
+  if (inputNames.size() != inputExtents.size())
+    return emitError() << "input name and extent counts must match";
+  if (outputNames.size() != outputExtents.size())
+    return emitError() << "output name and extent counts must match";
+  if (failed(verifyNames(emitError, "input", inputNames)) ||
+      failed(verifyNames(emitError, "output", outputNames)) ||
+      failed(verifyExtents(emitError, "input", inputExtents)) ||
+      failed(verifyExtents(emitError, "output", outputExtents)))
+    return failure();
+
+  AffineMap map = affineMapAttr.getValue();
+  if (map.getNumDims() != inputNames.size())
+    return emitError() << "affine map dimension count must match input names";
+  if (map.getNumResults() != outputNames.size())
+    return emitError() << "affine map result count must match output names";
+  unsigned dynamicInputs = llvm::count(inputExtents.asArrayRef(),
+                                       ShapedType::kDynamic);
+  if (map.getNumSymbols() != dynamicInputs)
+    return emitError() << "affine map symbol count must equal the number of "
+                          "dynamic input extents";
+  return success();
+}
+
+FailureOr<Attribute> AffineLayoutMapAttr::canonicalizeMap() const {
+  return Attribute(*this);
+}
+
+LogicalResult AffineLayoutMapAttr::verifyMap(Location loc) const {
+  return verify([&]() { return emitError(loc); }, getInputNames(),
+                getInputExtents(), getOutputNames(), getOutputExtents(),
+                getAffineMap());
+}
+
+Attribute ProductLayoutMapAttr::parse(AsmParser &parser, Type) {
+  llvm::SMLoc location = parser.getCurrentLocation();
+  Attribute outer;
+  Attribute inner;
+  DenseI64ArrayAttr splitExtents;
+  if (parser.parseLess() || parser.parseKeyword("outer") ||
+      parser.parseEqual() || parser.parseAttribute(outer) ||
+      parser.parseComma() || parser.parseKeyword("inner") ||
+      parser.parseEqual() || parser.parseAttribute(inner) ||
+      parser.parseComma() || parser.parseKeyword("split_extents") ||
+      parser.parseEqual() || parseI64List(parser, splitExtents) ||
+      parser.parseGreater())
+    return {};
+  return parser.getChecked<ProductLayoutMapAttr>(
+      location, parser.getContext(), outer, inner, splitExtents);
+}
+
+void ProductLayoutMapAttr::print(AsmPrinter &printer) const {
+  printer << "<outer = " << getOuter() << ", inner = " << getInner()
+          << ", split_extents = ";
+  printI64List(printer, getSplitExtents());
+  printer << '>';
+}
+
+LogicalResult ProductLayoutMapAttr::verify(
+    function_ref<InFlightDiagnostic()> emitError, Attribute outerAttr,
+    Attribute innerAttr, DenseI64ArrayAttr splitExtents) {
+  auto outer = dyn_cast<AffineLayoutMapAttr>(outerAttr);
+  auto inner = dyn_cast<BitLinearLayoutMapAttr>(innerAttr);
+  if (!outer || !inner)
+    return emitError()
+           << "product layout requires an affine outer and bit-linear inner";
+  if (splitExtents.size() != outer.getOutputNames().size())
+    return emitError() << "split extent count must match outer outputs";
+  if (inner.getOutputNames().size() != outer.getOutputNames().size())
+    return emitError() << "outer and inner output counts must match";
+
+  auto innerWidths = inner.getOutputBitWidths().asArrayRef();
+  for (auto [outerIndex, split] : llvm::enumerate(splitExtents.asArrayRef())) {
+    if (split <= 0 || !llvm::isPowerOf2_64(static_cast<uint64_t>(split)))
+      return emitError() << "split extents must be positive powers of two";
+    StringRef name =
+        cast<StringAttr>(outer.getOutputNames()[outerIndex]).getValue();
+    std::optional<unsigned> innerIndex = findName(inner.getOutputNames(), name);
+    if (!innerIndex)
+      return emitError() << "inner layout is missing output dimension '" << name
+                         << "'";
+    if (innerWidths[*innerIndex] != llvm::Log2_64(split))
+      return emitError() << "inner bit width for output '" << name
+                         << "' must equal log2(split extent)";
+    AffineExpr result = outer.getAffineMap().getValue().getResult(outerIndex);
+    if (!result.isMultipleOf(split)) {
+      std::string expression;
+      llvm::raw_string_ostream stream(expression);
+      result.print(stream);
+      stream.flush();
+      return emitError() << "cannot prove outer result '" << expression
+                         << "' is aligned to split extent " << split;
+    }
+  }
+  return success();
+}
+
+FailureOr<Attribute> ProductLayoutMapAttr::canonicalizeMap() const {
+  auto outer = dyn_cast<LayoutMapAttrInterface>(getOuter());
+  auto inner = dyn_cast<LayoutMapAttrInterface>(getInner());
+  if (!outer || !inner)
+    return failure();
+  FailureOr<Attribute> canonicalOuter = outer.canonicalizeMap();
+  FailureOr<Attribute> canonicalInner = inner.canonicalizeMap();
+  if (failed(canonicalOuter) || failed(canonicalInner))
+    return failure();
+  return Attribute(ProductLayoutMapAttr::get(
+      getContext(), *canonicalOuter, *canonicalInner, getSplitExtents()));
+}
+
+LogicalResult ProductLayoutMapAttr::verifyMap(Location loc) const {
+  return verify([&]() { return emitError(loc); }, getOuter(), getInner(),
+                getSplitExtents());
+}
+
+namespace {
+
+// M1 keeps this bounded evaluator as a conservative verifier/reference oracle.
+// Exact GF(2) proofs bypass it below. Symbolic or larger affine/product maps
+// return Unknown and must be handled by a later Presburger proof, never guessed.
+constexpr uint64_t kEnumerationLimit = 65536;
+
+FailureOr<SmallVector<int64_t>>
+evaluateAffine(AffineLayoutMapAttr map, ArrayRef<int64_t> coordinates) {
+  AffineMap affineMap = map.getAffineMap().getValue();
+  if (coordinates.size() != affineMap.getNumDims() ||
+      affineMap.getNumSymbols() != 0)
+    return failure();
+
+  Builder builder(map.getContext());
+  SmallVector<Attribute> operands;
+  operands.reserve(coordinates.size());
+  for (int64_t coordinate : coordinates)
+    operands.push_back(builder.getIndexAttr(coordinate));
+  SmallVector<Attribute> folded;
+  if (failed(affineMap.constantFold(operands, folded)))
+    return failure();
+
+  SmallVector<int64_t> result;
+  result.reserve(folded.size());
+  for (Attribute value : folded)
+    result.push_back(cast<IntegerAttr>(value).getInt());
+  return result;
+}
+
+FailureOr<SmallVector<int64_t>>
+evaluateBitLinear(BitLinearLayoutMapAttr map,
+                  ArrayRef<int64_t> coordinates) {
+  if (coordinates.size() != map.getInputNames().size())
+    return failure();
+  unsigned totalInputBits = 0;
+  for (int64_t width : map.getInputBitWidths().asArrayRef())
+    totalInputBits += static_cast<unsigned>(width);
+  llvm::APInt input(totalInputBits, 0);
+  unsigned offset = 0;
+  for (auto [coordinate, widthValue] :
+       llvm::zip_equal(coordinates, map.getInputBitWidths().asArrayRef())) {
+    if (coordinate < 0)
+      return failure();
+    unsigned width = static_cast<unsigned>(widthValue);
+    llvm::APInt value(width, static_cast<uint64_t>(coordinate));
+    if (value.getLimitedValue() != static_cast<uint64_t>(coordinate))
+      return failure();
+    input.insertBits(value, offset);
+    offset += width;
+  }
+
+  FailureOr<GF2Matrix> matrix = map.getMatrixValue();
+  if (failed(matrix))
+    return failure();
+  llvm::APInt output = matrix->apply(input);
+  SmallVector<int64_t> result;
+  result.reserve(map.getOutputNames().size());
+  offset = 0;
+  for (int64_t widthValue : map.getOutputBitWidths().asArrayRef()) {
+    unsigned width = static_cast<unsigned>(widthValue);
+    llvm::APInt value = output.extractBits(width, offset);
+    if (width > 63 && value.getActiveBits() > 63)
+      return failure();
+    result.push_back(static_cast<int64_t>(value.getZExtValue()));
+    offset += width;
+  }
+  return result;
+}
+
+FailureOr<SmallVector<int64_t>>
+evaluateProduct(ProductLayoutMapAttr map, ArrayRef<int64_t> coordinates) {
+  auto outer = cast<AffineLayoutMapAttr>(map.getOuter());
+  auto inner = cast<BitLinearLayoutMapAttr>(map.getInner());
+  unsigned outerInputs = outer.getInputNames().size();
+  unsigned innerInputs = inner.getInputNames().size();
+  if (coordinates.size() != outerInputs + innerInputs)
+    return failure();
+
+  FailureOr<SmallVector<int64_t>> outerValues =
+      evaluateAffine(outer, coordinates.take_front(outerInputs));
+  FailureOr<SmallVector<int64_t>> innerValues =
+      evaluateBitLinear(inner, coordinates.take_back(innerInputs));
+  if (failed(outerValues) || failed(innerValues))
+    return failure();
+
+  SmallVector<int64_t> result;
+  result.reserve(outer.getOutputNames().size());
+  for (auto [outerIndex, nameAttr] :
+       llvm::enumerate(outer.getOutputNames())) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    std::optional<unsigned> innerIndex = findName(inner.getOutputNames(), name);
+    if (!innerIndex)
+      return failure();
+    int64_t outerValue = (*outerValues)[outerIndex];
+    int64_t innerValue = (*innerValues)[*innerIndex];
+    if (innerValue > 0 &&
+        outerValue > std::numeric_limits<int64_t>::max() - innerValue)
+      return failure();
+    result.push_back(outerValue + innerValue);
+  }
+  return result;
+}
+
+FailureOr<SmallVector<int64_t>> evaluateLayout(Attribute map,
+                                                ArrayRef<int64_t> point) {
+  if (auto affine = dyn_cast<AffineLayoutMapAttr>(map))
+    return evaluateAffine(affine, point);
+  if (auto bitLinear = dyn_cast<BitLinearLayoutMapAttr>(map))
+    return evaluateBitLinear(bitLinear, point);
+  if (auto product = dyn_cast<ProductLayoutMapAttr>(map))
+    return evaluateProduct(product, point);
+  return failure();
+}
+
+FailureOr<SmallVector<int64_t>> getStaticDomain(Attribute map) {
+  if (auto affine = dyn_cast<AffineLayoutMapAttr>(map)) {
+    SmallVector<int64_t> domain(affine.getInputExtents().asArrayRef());
+    if (llvm::is_contained(domain, ShapedType::kDynamic))
+      return failure();
+    return domain;
+  }
+  if (auto bitLinear = dyn_cast<BitLinearLayoutMapAttr>(map)) {
+    SmallVector<int64_t> domain;
+    domain.reserve(bitLinear.getInputBitWidths().size());
+    for (int64_t width : bitLinear.getInputBitWidths().asArrayRef()) {
+      if (width >= 63)
+        return failure();
+      domain.push_back(int64_t{1} << width);
+    }
+    return domain;
+  }
+  if (auto product = dyn_cast<ProductLayoutMapAttr>(map)) {
+    auto outer = cast<AffineLayoutMapAttr>(product.getOuter());
+    auto inner = cast<BitLinearLayoutMapAttr>(product.getInner());
+    FailureOr<SmallVector<int64_t>> outerDomain = getStaticDomain(outer);
+    FailureOr<SmallVector<int64_t>> innerDomain = getStaticDomain(inner);
+    if (failed(outerDomain) || failed(innerDomain))
+      return failure();
+    outerDomain->append(innerDomain->begin(), innerDomain->end());
+    return *outerDomain;
+  }
+  return failure();
+}
+
+FailureOr<uint64_t> getPointCount(ArrayRef<int64_t> extents) {
+  uint64_t count = 1;
+  for (int64_t extent : extents) {
+    if (extent <= 0 || static_cast<uint64_t>(extent) >
+                           kEnumerationLimit / count)
+      return failure();
+    count *= static_cast<uint64_t>(extent);
+  }
+  return count;
+}
+
+LogicalResult enumeratePoints(
+    ArrayRef<int64_t> extents,
+    function_ref<LogicalResult(ArrayRef<int64_t>)> callback) {
+  FailureOr<uint64_t> pointCount = getPointCount(extents);
+  if (failed(pointCount))
+    return failure();
+  SmallVector<int64_t> point(extents.size(), 0);
+  for (uint64_t linear = 0; linear < *pointCount; ++linear) {
+    if (failed(callback(point)))
+      return failure();
+    for (size_t index = extents.size(); index > 0; --index) {
+      unsigned dimension = index - 1;
+      if (++point[dimension] < extents[dimension])
+        break;
+      point[dimension] = 0;
+    }
+  }
+  return success();
+}
+
+ArrayAttr selectNames(MLIRContext *context, ArrayAttr names,
+                      ArrayRef<unsigned> order) {
+  SmallVector<Attribute> selected;
+  selected.reserve(order.size());
+  for (unsigned index : order)
+    selected.push_back(names[index]);
+  return ArrayAttr::get(context, selected);
+}
+
+DenseI64ArrayAttr selectI64(MLIRContext *context, DenseI64ArrayAttr values,
+                            ArrayRef<unsigned> order) {
+  SmallVector<int64_t> selected;
+  selected.reserve(order.size());
+  for (unsigned index : order)
+    selected.push_back(values[index]);
+  return DenseI64ArrayAttr::get(context, selected);
+}
+
+FailureOr<Attribute> projectAffine(AffineLayoutMapAttr map,
+                                   ArrayRef<StringRef> outputs) {
+  FailureOr<SmallVector<unsigned>> order =
+      getOutputOrder(map.getOutputNames(), outputs);
+  if (failed(order))
+    return failure();
+  SmallVector<AffineExpr> results;
+  results.reserve(order->size());
+  for (unsigned index : *order)
+    results.push_back(map.getAffineMap().getValue().getResult(index));
+  AffineMap projected =
+      AffineMap::get(map.getAffineMap().getValue().getNumDims(),
+                     map.getAffineMap().getValue().getNumSymbols(), results,
+                     map.getContext());
+  return Attribute(AffineLayoutMapAttr::get(
+      map.getContext(), map.getInputNames(), map.getInputExtents(),
+      selectNames(map.getContext(), map.getOutputNames(), *order),
+      selectI64(map.getContext(), map.getOutputExtents(), *order),
+      AffineMapAttr::get(projected)));
+}
+
+FailureOr<Attribute> projectBitLinear(BitLinearLayoutMapAttr map,
+                                      ArrayRef<StringRef> outputs) {
+  FailureOr<SmallVector<unsigned>> order =
+      getOutputOrder(map.getOutputNames(), outputs);
+  if (failed(order))
+    return failure();
+
+  auto widths = map.getOutputBitWidths().asArrayRef();
+  SmallVector<unsigned> offsets(widths.size());
+  for (unsigned index = 1; index < widths.size(); ++index)
+    offsets[index] = offsets[index - 1] + widths[index - 1];
+  unsigned inputBits = 0;
+  for (int64_t width : map.getInputBitWidths().asArrayRef())
+    inputBits += static_cast<unsigned>(width);
+
+  SmallVector<llvm::APInt> oldValues;
+  for (const llvm::APInt &value : map.getMatrix().getValues<llvm::APInt>())
+    oldValues.push_back(value);
+  SmallVector<llvm::APInt> newValues;
+  for (unsigned outputIndex : *order) {
+    for (unsigned bit = 0; bit < static_cast<unsigned>(widths[outputIndex]);
+         ++bit) {
+      unsigned row = offsets[outputIndex] + bit;
+      for (unsigned column = 0; column < inputBits; ++column)
+        newValues.push_back(oldValues[row * inputBits + column]);
+    }
+  }
+
+  DenseI64ArrayAttr selectedWidths =
+      selectI64(map.getContext(), map.getOutputBitWidths(), *order);
+  unsigned outputBits = 0;
+  for (int64_t width : selectedWidths.asArrayRef())
+    outputBits += static_cast<unsigned>(width);
+  auto matrixType = RankedTensorType::get(
+      {static_cast<int64_t>(outputBits), static_cast<int64_t>(inputBits)},
+      IntegerType::get(map.getContext(), 1));
+  return Attribute(BitLinearLayoutMapAttr::get(
+      map.getContext(), map.getInputNames(), map.getInputBitWidths(),
+      selectNames(map.getContext(), map.getOutputNames(), *order),
+      selectedWidths, DenseIntElementsAttr::get(matrixType, newValues)));
+}
+
+FailureOr<Attribute> projectProduct(ProductLayoutMapAttr map,
+                                    ArrayRef<StringRef> outputs) {
+  auto outer = cast<AffineLayoutMapAttr>(map.getOuter());
+  FailureOr<SmallVector<unsigned>> order =
+      getOutputOrder(outer.getOutputNames(), outputs);
+  if (failed(order))
+    return failure();
+  FailureOr<Attribute> projectedOuter = projectLayoutMap(map.getOuter(), outputs);
+  FailureOr<Attribute> projectedInner = projectLayoutMap(map.getInner(), outputs);
+  if (failed(projectedOuter) || failed(projectedInner))
+    return failure();
+  return Attribute(ProductLayoutMapAttr::get(
+      map.getContext(), *projectedOuter, *projectedInner,
+      selectI64(map.getContext(), map.getSplitExtents(), *order)));
+}
+
+ArrayAttr getOutputNames(Attribute map) {
+  if (auto affine = dyn_cast<AffineLayoutMapAttr>(map))
+    return affine.getOutputNames();
+  if (auto bitLinear = dyn_cast<BitLinearLayoutMapAttr>(map))
+    return bitLinear.getOutputNames();
+  if (auto product = dyn_cast<ProductLayoutMapAttr>(map))
+    return cast<AffineLayoutMapAttr>(product.getOuter()).getOutputNames();
+  return {};
+}
+
+FailureOr<Attribute> composeAffine(AffineLayoutMapAttr lhs,
+                                   AffineLayoutMapAttr rhs) {
+  if (lhs.getContext() != rhs.getContext())
+    return failure();
+  AffineMap lhsMap = lhs.getAffineMap().getValue();
+  AffineMap rhsMap = rhs.getAffineMap().getValue();
+  if (lhsMap.getNumSymbols() != 0 || rhsMap.getNumSymbols() != 0)
+    return failure();
+  FailureOr<SmallVector<unsigned>> order = getOutputOrder(
+      rhs.getOutputNames(), llvm::map_to_vector(lhs.getInputNames(), [](Attribute value) {
+        return cast<StringAttr>(value).getValue();
+      }));
+  if (failed(order) || order->size() != rhs.getOutputNames().size())
+    return failure();
+  for (auto [lhsIndex, rhsIndex] : llvm::enumerate(*order)) {
+    int64_t lhsExtent = lhs.getInputExtents()[lhsIndex];
+    int64_t rhsExtent = rhs.getOutputExtents()[rhsIndex];
+    if (lhsExtent != ShapedType::kDynamic &&
+        rhsExtent != ShapedType::kDynamic && lhsExtent != rhsExtent)
+      return failure();
+  }
+
+  SmallVector<AffineExpr> alignedResults;
+  alignedResults.reserve(order->size());
+  for (unsigned index : *order)
+    alignedResults.push_back(rhsMap.getResult(index));
+  AffineMap alignedRhs = AffineMap::get(rhsMap.getNumDims(), 0,
+                                        alignedResults, lhs.getContext());
+  AffineMap composed = lhsMap.compose(alignedRhs);
+  return Attribute(AffineLayoutMapAttr::get(
+      lhs.getContext(), rhs.getInputNames(), rhs.getInputExtents(),
+      lhs.getOutputNames(), lhs.getOutputExtents(),
+      AffineMapAttr::get(composed)));
+}
+
+} // namespace
+
+FailureOr<Attribute> composeLayoutMaps(Attribute lhs, Attribute rhs) {
+  if (auto lhsBit = dyn_cast<BitLinearLayoutMapAttr>(lhs)) {
+    auto rhsBit = dyn_cast<BitLinearLayoutMapAttr>(rhs);
+    if (!rhsBit)
+      return failure();
+    FailureOr<BitLinearLayoutMapAttr> composed =
+        composeBitLinear(lhsBit, rhsBit);
+    if (failed(composed))
+      return failure();
+    return Attribute(*composed);
+  }
+  if (auto lhsAffine = dyn_cast<AffineLayoutMapAttr>(lhs)) {
+    auto rhsAffine = dyn_cast<AffineLayoutMapAttr>(rhs);
+    if (!rhsAffine)
+      return failure();
+    return composeAffine(lhsAffine, rhsAffine);
+  }
+  if (auto lhsProduct = dyn_cast<ProductLayoutMapAttr>(lhs)) {
+    auto rhsProduct = dyn_cast<ProductLayoutMapAttr>(rhs);
+    if (!rhsProduct ||
+        lhsProduct.getSplitExtents() != rhsProduct.getSplitExtents())
+      return failure();
+    FailureOr<Attribute> outer =
+        composeLayoutMaps(lhsProduct.getOuter(), rhsProduct.getOuter());
+    FailureOr<Attribute> inner =
+        composeLayoutMaps(lhsProduct.getInner(), rhsProduct.getInner());
+    if (failed(outer) || failed(inner))
+      return failure();
+    return Attribute(ProductLayoutMapAttr::get(
+        lhsProduct.getContext(), *outer, *inner,
+        lhsProduct.getSplitExtents()));
+  }
+  return failure();
+}
+
+FailureOr<Attribute> projectLayoutMap(Attribute map,
+                                      ArrayRef<StringRef> outputs) {
+  if (auto affine = dyn_cast<AffineLayoutMapAttr>(map))
+    return projectAffine(affine, outputs);
+  if (auto bitLinear = dyn_cast<BitLinearLayoutMapAttr>(map))
+    return projectBitLinear(bitLinear, outputs);
+  if (auto product = dyn_cast<ProductLayoutMapAttr>(map))
+    return projectProduct(product, outputs);
+  return failure();
+}
+
+FailureOr<Attribute> permuteLayoutMap(Attribute map,
+                                      ArrayRef<StringRef> outputs) {
+  ArrayAttr currentOutputs = getOutputNames(map);
+  if (!currentOutputs || currentOutputs.size() != outputs.size())
+    return failure();
+  return projectLayoutMap(map, outputs);
+}
+
+LayoutProof checkCoverage(Attribute map, ArrayRef<int64_t> logicalShape) {
+  if (auto bitLinear = dyn_cast<BitLinearLayoutMapAttr>(map)) {
+    if (logicalShape.size() == bitLinear.getOutputBitWidths().size()) {
+      bool fitsOutputSpace = true;
+      for (auto [extent, width] : llvm::zip_equal(
+               logicalShape, bitLinear.getOutputBitWidths().asArrayRef())) {
+        if (extent <= 0 || width >= 63 || extent > (int64_t{1} << width))
+          fitsOutputSpace = false;
+      }
+      LayoutProof surjective = checkSurjective(bitLinear);
+      if (fitsOutputSpace && surjective.status == ProofStatus::Proven)
+        return {ProofStatus::Proven, {},
+                "surjective GF(2) map covers the bounded logical shape"};
+    }
+  }
+
+  FailureOr<SmallVector<int64_t>> domain = getStaticDomain(map);
+  FailureOr<uint64_t> targetCount = getPointCount(logicalShape);
+  if (failed(domain) || failed(targetCount) ||
+      getOutputNames(map).size() != logicalShape.size())
+    return {ProofStatus::Unknown, {},
+            "coverage requires a bounded static domain and result shape"};
+
+  std::set<std::vector<int64_t>> covered;
+  if (failed(enumeratePoints(*domain, [&](ArrayRef<int64_t> point) {
+        FailureOr<SmallVector<int64_t>> output = evaluateLayout(map, point);
+        if (failed(output) || output->size() != logicalShape.size())
+          return failure();
+        bool inBounds = true;
+        for (auto [coordinate, extent] :
+             llvm::zip_equal(*output, logicalShape))
+          inBounds &= coordinate >= 0 && coordinate < extent;
+        if (inBounds)
+          covered.insert(std::vector<int64_t>(output->begin(), output->end()));
+        return success();
+      })))
+    return {ProofStatus::Unknown, {}, "layout evaluation was not provable"};
+
+  if (covered.size() == *targetCount)
+    return {ProofStatus::Proven, {},
+            "every point in the bounded logical shape is covered"};
+
+  SmallVector<int64_t> missing;
+  (void)enumeratePoints(logicalShape, [&](ArrayRef<int64_t> point) {
+    std::vector<int64_t> key(point.begin(), point.end());
+    if (!missing.empty() || covered.count(key))
+      return success();
+    missing.assign(point.begin(), point.end());
+    return success();
+  });
+  return {ProofStatus::Disproven, std::move(missing),
+          "logical shape contains an uncovered point"};
+}
+
+LayoutProof checkInjectivity(Attribute map, ArrayRef<int64_t> domainShape) {
+  if (auto bitLinear = dyn_cast<BitLinearLayoutMapAttr>(map)) {
+    FailureOr<SmallVector<int64_t>> fullDomain = getStaticDomain(bitLinear);
+    if (succeeded(fullDomain) && ArrayRef<int64_t>(*fullDomain) == domainShape)
+      return checkInjective(bitLinear);
+  }
+
+  FailureOr<uint64_t> pointCount = getPointCount(domainShape);
+  if (failed(pointCount))
+    return {ProofStatus::Unknown, {},
+            "injectivity domain is dynamic or exceeds enumeration limit"};
+
+  std::set<std::vector<int64_t>> seen;
+  SmallVector<int64_t> duplicate;
+  if (failed(enumeratePoints(domainShape, [&](ArrayRef<int64_t> point) {
+        FailureOr<SmallVector<int64_t>> output = evaluateLayout(map, point);
+        if (failed(output))
+          return failure();
+        std::vector<int64_t> key(output->begin(), output->end());
+        if (!seen.insert(key).second && duplicate.empty())
+          duplicate.assign(point.begin(), point.end());
+        return success();
+      })))
+    return {ProofStatus::Unknown, {}, "layout evaluation was not provable"};
+
+  if (!duplicate.empty())
+    return {ProofStatus::Disproven, std::move(duplicate),
+            "two domain points map to the same output"};
+  return {ProofStatus::Proven, {},
+          "bounded enumeration found a unique output for every domain point"};
 }
 
 } // namespace mlir::frisk

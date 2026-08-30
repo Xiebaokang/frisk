@@ -5,7 +5,10 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 
+#include "mlir/IR/Attributes.h"
 #include "mlir/Support/LLVM.h"
+
+#include "Dialect/Frisk/Analysis/LayoutCommon.h"
 
 namespace mlir::frisk {
 
@@ -41,6 +44,14 @@ private:
   unsigned numColumns;
   SmallVector<llvm::APInt> rows;
 };
+
+FailureOr<Attribute> composeLayoutMaps(Attribute lhs, Attribute rhs);
+FailureOr<Attribute> projectLayoutMap(Attribute map,
+                                      ArrayRef<StringRef> outputs);
+FailureOr<Attribute> permuteLayoutMap(Attribute map,
+                                      ArrayRef<StringRef> outputs);
+LayoutProof checkCoverage(Attribute map, ArrayRef<int64_t> logicalShape);
+LayoutProof checkInjectivity(Attribute map, ArrayRef<int64_t> domainShape);
 
 } // namespace mlir::frisk
 
