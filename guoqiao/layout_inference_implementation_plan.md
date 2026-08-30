@@ -685,7 +685,7 @@ class LayoutConstraintOpInterface;
 class LayoutConstraintBuilder;
 ```
 
-- [ ] **Step 1: 写 Interface 生成失败测试**
+- [x] **Step 1: 写 Interface 生成失败测试**
 
 测试包含新头文件并做静态检查：
 
@@ -702,7 +702,7 @@ cmake --build build --target FriskLayoutUnitTests --parallel 32
 
 Expected: FAIL，原因是头文件和 unit test target 尚不存在。
 
-- [ ] **Step 2: 定义公共结果类型**
+- [x] **Step 2: 定义公共结果类型**
 
 `LayoutCommon.h` 定义上述枚举，并增加：
 
@@ -717,7 +717,7 @@ using LayoutMapAttr = LayoutMapAttrInterface;
 
 `extent == ShapedType::kDynamic` 只允许出现在 affine outer；BitLinear 的 bit width 必须静态。
 
-- [ ] **Step 3: 定义 Attr/Encoding 接口**
+- [x] **Step 3: 定义 Attr/Encoding 接口**
 
 `FriskLayoutAttrInterfaces.td` 至少声明：
 
@@ -739,23 +739,29 @@ def LayoutEncodingAttrInterface : AttrInterface<"LayoutEncodingAttrInterface"> {
                     "getCanonicalMap", (ins "::mlir::ShapedType":$type)>,
     InterfaceMethod<"Verify encoding", "::mlir::LogicalResult",
                     "verifyForType", (ins "::mlir::ShapedType":$type,
-                                           "::mlir::Location":$loc)>
+                                           "::mlir::Location":$loc)>,
+    InterfaceMethod<"Return encoding kind", "::mlir::frisk::LayoutKind",
+                    "getKind", (ins)>
   ];
 }
 ```
 
 `FriskLayoutOpInterfaces.td` 声明 `collectLayoutConstraints(LayoutConstraintBuilder&)`；此时只生成声明，Task 11 再提供 builder 实现。
 
-- [ ] **Step 4: 接入 TableGen 和 unit test**
+- [x] **Step 4: 接入 TableGen 和 unit test**
 
 为 Attr interface 和 Op interface 分别生成 decl/def，避免两个 generator 写同一文件；`FriskIR` 增加 `FriskLayoutInterfaces.cpp`。Unit test 使用：
 
 ```cmake
-add_unittest(FriskLayoutUnitTests
+add_unittest(FriskUnitTests FriskLayoutUnitTests
   LayoutInterfaceTest.cpp
 )
 target_link_libraries(FriskLayoutUnitTests PRIVATE FriskIR MLIRIR)
 ```
+
+Frisk 是外部 MLIR 工程；若 LLVM 配置未导出 `llvm_gtest` target，`unittests/CMakeLists.txt`
+必须先从 `${LLVM_MAIN_SRC_DIR}/../third-party/unittest` 引入与当前 LLVM 源码匹配的
+gtest/gmock，再调用 `add_unittest`。不能依赖系统 gtest 或裸 `-lllvm_gtest`。
 
 Run:
 
@@ -771,7 +777,7 @@ cmake --build build --target FriskLayoutUnitTests --parallel 32
 
 Expected: unit test PASS。
 
-- [ ] **Step 5: 提交接口骨架**
+- [x] **Step 5: 提交接口骨架**
 
 ```bash
 git add include/Dialect/Frisk lib/Dialect/Frisk unittests CMakeLists.txt

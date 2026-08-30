@@ -221,11 +221,16 @@ Global MemRef 的默认物理布局直接复用 strided/affine layout；只有 t
 所有具体 encoding 实现统一的 `LayoutEncodingInterface`，至少提供：
 
 ```cpp
-FailureOr<LayoutMapAttr> getCanonicalMap(ShapedType type,
-                                         const TargetInfo &target) const;
+FailureOr<Attribute> getCanonicalMap(ShapedType type) const;
 LogicalResult verifyForType(ShapedType type, Location loc) const;
 LayoutKind getKind() const; // distributed / storage / instruction
 ```
+
+Encoding 展开不接收隐式 target 上下文：Distributed/Storage encoding 已携带确定的 map，
+指令类 encoding 则必须先由 target rule library 选择并固化契约参数。这样 canonicalization
+是纯函数，同一 attribute 不会因 pass 外部 target 状态不同而产生不同结果；返回
+`Attribute` 是生成式 interface 的 ABI 边界，调用者必须再验证结果实现
+`LayoutMapAttrInterface`。
 
 `MmaEncodingAttr` 和 `DotOperandEncodingAttr` 是指令契约，而不是另一套独立数学系统；它们必须可展开成 canonical layout map。这样 target-specific 属性不会污染通用 compose/equality/verifier。
 

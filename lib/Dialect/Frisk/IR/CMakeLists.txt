@@ -1,6 +1,7 @@
 add_frisk_library(FriskIR
   FriskAttributes.cpp
   FriskEnums.cpp
+  FriskLayoutInterfaces.cpp
   FriskOps.cpp
   FriskOps_Reduce.cpp
   ../Utils/LayoutUtils.cpp

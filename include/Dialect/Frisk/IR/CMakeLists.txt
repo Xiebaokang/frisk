@@ -18,8 +18,13 @@ set(LLVM_TARGET_DEFINITIONS FriskAttributes.td)
 mlir_tablegen(FriskAttributes.h.inc -gen-attrdef-decls -dialect=frisk)
 mlir_tablegen(FriskAttributes.cpp.inc -gen-attrdef-defs -dialect=frisk)
 
-# mlir_tablegen(FriskInterfaces.h.inc -gen-op-interface-decls)
-# mlir_tablegen(FriskInterfaces.cpp.inc -gen-op-interface-defs)
+set(LLVM_TARGET_DEFINITIONS FriskLayoutAttrInterfaces.td)
+mlir_tablegen(FriskLayoutAttrInterfaces.h.inc -gen-attr-interface-decls)
+mlir_tablegen(FriskLayoutAttrInterfaces.cpp.inc -gen-attr-interface-defs)
+
+set(LLVM_TARGET_DEFINITIONS FriskLayoutOpInterfaces.td)
+mlir_tablegen(FriskLayoutOpInterfaces.h.inc -gen-op-interface-decls)
+mlir_tablegen(FriskLayoutOpInterfaces.cpp.inc -gen-op-interface-defs)
 
 set(LLVM_TARGET_DEFINITIONS FriskEnums.td)
 mlir_tablegen(FriskEnums.h.inc -gen-enum-decls -dialect=frisk)
