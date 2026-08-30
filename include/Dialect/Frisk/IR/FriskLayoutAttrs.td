@@ -64,4 +64,47 @@ def ProductLayoutMapAttr
   }];
 }
 
+def DistributedEncodingAttr
+    : AttrDef<Frisk_Dialect, "DistributedEncoding", [LayoutEncodingAttrInterface]> {
+  let cppNamespace = "::mlir::frisk";
+  let summary = "A hardware-carrier to logical-tile encoding";
+  let mnemonic = "distributed";
+  let parameters = (ins
+    AttrParameter<"::mlir::Attribute", "canonical distributed map">:$map,
+    AttrParameter<"::mlir::DenseI64ArrayAttr", "register/lane/warp/warp-group/CTA extents">:$topology,
+    AttrParameter<"::mlir::IntegerAttr", "number of hardware owners per logical element">:$replication
+  );
+  let hasCustomAssemblyFormat = 1;
+  let genVerifyDecl = 1;
+  let extraClassDeclaration = [{
+    ::mlir::FailureOr<::mlir::Attribute>
+    getCanonicalMap(::mlir::ShapedType type) const;
+    ::mlir::LogicalResult verifyForType(::mlir::ShapedType type,
+                                        ::mlir::Location loc) const;
+    ::mlir::frisk::LayoutKind getKind() const;
+  }];
+}
+
+def StorageLayoutAttr
+    : AttrDef<Frisk_Dialect, "StorageLayout", [LayoutEncodingAttrInterface]> {
+  let cppNamespace = "::mlir::frisk";
+  let summary = "A logical-tile to byte/bit storage encoding";
+  let mnemonic = "storage";
+  let parameters = (ins
+    AttrParameter<"::mlir::Attribute", "canonical storage map">:$map,
+    AttrParameter<"::mlir::frisk::MemorySpaceAttr", "physical memory space">:$memorySpace,
+    AttrParameter<"::mlir::IntegerAttr", "base alignment in bytes">:$alignment,
+    AttrParameter<"::mlir::IntegerAttr", "safe vector granularity in bytes">:$vectorGranularity
+  );
+  let hasCustomAssemblyFormat = 1;
+  let genVerifyDecl = 1;
+  let extraClassDeclaration = [{
+    ::mlir::FailureOr<::mlir::Attribute>
+    getCanonicalMap(::mlir::ShapedType type) const;
+    ::mlir::LogicalResult verifyForType(::mlir::ShapedType type,
+                                        ::mlir::Location loc) const;
+    ::mlir::frisk::LayoutKind getKind() const;
+  }];
+}
+
 #endif // FRISK_LAYOUT_ATTRS_TD

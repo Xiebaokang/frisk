@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++17、LLVM/MLIR ODS/TableGen、MLIR Pass/Dialect Conversion、Affine/Presburger、SCF、MemRef、Tensor、GPU/NVGPU/NVVM、LLVM ADT/APInt、CMake/Ninja、llvm-lit/FileCheck、CTest、CUDA/Nsight 性能工具。
 
-> **执行状态（2026-08-30）：M0 已完成并通过 Gate；M1 进行中，Task 5–8 已完成，下一任务为 Task 9。**
+> **执行状态（2026-08-30）：M0、M1 已完成并通过 Gate；下一未完成里程碑为 M2（Task 10）。**
 
 ## Global Constraints
 
@@ -1049,9 +1049,11 @@ git commit -m "feat: compose affine and bit-linear layouts"
 **Files:**
 
 - Modify: `include/Dialect/Frisk/IR/FriskLayoutAttrs.td`
+- Modify: `include/Dialect/Frisk/IR/FriskAttributes.td`
 - Modify: `lib/Dialect/Frisk/IR/FriskLayoutAttrs.cpp`
 - Create: `include/Dialect/Frisk/Analysis/LegacyLayoutAdapter.h`
 - Create: `lib/Dialect/Frisk/Analysis/LegacyLayoutAdapter.cpp`
+- Modify: `lib/Dialect/Frisk/Analysis/CMakeLists.txt`
 - Create: `unittests/Dialect/Frisk/Layout/LayoutEncodingTest.cpp`
 - Create: `unittests/Dialect/Frisk/Layout/LegacyLayoutAdapterTest.cpp`
 - Create: `test/Dialect/Frisk/layout/layout-encoding.mlir`
@@ -1093,7 +1095,7 @@ ODS assembly format 固定为命名字段；后续测试中的 `#smem_layout` �
 
 `topology` 的字段顺序固定为 `(register, lane, warp, warp_group, cta)`；parser、printer 和 verifier 共同使用这一顺序，禁止依靠调用点注释猜测。
 
-- [ ] **Step 1: 写 type verifier 和 baseline conversion 红灯测试**
+- [x] **Step 1: 写 type verifier 和 baseline conversion 红灯测试**
 
 测试：encoding logical shape 不匹配、Storage map 非单射、shared alignment 非正、现有 `sm90_ss` Gemm A/B/C legacy layout 转换。
 
@@ -1101,13 +1103,18 @@ Run: `cmake --build build --target FriskLayoutUnitTests --parallel 32`。
 
 Expected: FAIL，新 Encoding/adapter 不存在。
 
-- [ ] **Step 2: 实现 Encoding verifier**
+- [x] **Step 2: 实现 Encoding verifier**
 
-Distributed 检查 carrier names 只来自 `register/lane/warp/warp_group/cta`、coverage、replication 与 topology；Storage 检查 memory space、live domain injectivity、bit/byte offset 和 alignment。
+Distributed 检查 carrier names 只来自 `register/lane/warp/warp_group/cta`、coverage、replication 与 topology；对 BitLinear map 精确验证
+`replication = product(topology) / 2^rank(B_D)`。Storage 检查 memory space、live
+domain injectivity、`(byte_offset, bit_offset)`、byte 单位的 alignment/vector
+granularity。
 
-- [ ] **Step 3: 实现显式支持集的 legacy adapter**
+- [x] **Step 3: 实现显式支持集的 legacy adapter**
 
-Adapter 仅支持当前 baseline 中可证明的 affine fragment、linear/padded shared 和已知 SM80/SM90 swizzle。无法识别时：
+Adapter 仅支持当前 SM90 baseline 中可证明的静态 2 次幂 fragment、linear/padded
+shared 和能从完整真值表恢复 GF(2) basis 的 swizzle。SM80 旧路径继续回归，但不作为
+当前 SM90-only adapter 的支持承诺。无法识别时：
 
 ```cpp
 return emitError(loc)
@@ -1116,7 +1123,12 @@ return emitError(loc)
 
 不得猜测、不得退化为 linear layout。对 swizzle 使用现有语义逐点枚举构造 GF(2) basis，并验证全域后才返回。
 
-- [ ] **Step 4: 对现有 baseline 做等价枚举**
+实现细节：adapter 单独编译为 `FriskLegacyLayoutAdapter`，依赖 `FriskIR` 和
+`FriskAnalysis`，从而避免 `FriskIR <-> FriskAnalysis` 循环。多结果 legacy storage
+tuple 采用由各结果最大 extent 确定的 row-major flatten；只有单结果 map 可进入
+Affine fallback。枚举上限为 65,536，超限返回 failure。
+
+- [x] **Step 4: 对现有 baseline 做等价枚举**
 
 对每个 `(thread, register)` 和 logical shared point，比较 legacy 与新 canonical map；测试失败必须打印首个反例。
 
@@ -1128,9 +1140,10 @@ cmake --build build --target FriskLayoutUnitTests check-frisk --parallel 32
   --gtest_filter='LayoutEncodingTest.*:LegacyLayoutAdapterTest.*'
 ```
 
-Expected: 所有 baseline conversion PASS。
+Expected: `sm90_ss` 和 `sm90_rs` 所有已转换 operand PASS；其中 `sm90_rs` A 的
+legacy `replicate=2` 必须成为一个零 carrier bit，并由 GF(2) rank 验证为 2。
 
-- [ ] **Step 5: 维护设计文档并提交**
+- [x] **Step 5: 维护设计文档并提交**
 
 如果最终 Attr 参数或 canonicalization 与设计文档 Section 5/6 不同，先同步修改。
 
@@ -1151,6 +1164,11 @@ ctest --test-dir build --output-on-failure
 ```
 
 Expected: 全部通过；现有 SM90 layout baseline 的新旧枚举无差异；无 `unknown` 被当作 proven 的测试路径。
+
+**执行结果（2026-08-30）：PASS。** `FriskLayoutUnitTests` 运行 6 个 suite、
+24 个测试全部通过；lit 4/4 通过；CTest 4/4 通过。`sm90_ss` 与 `sm90_rs`
+adapter 对每个 logical point 完成新旧差分，动态 Affine proof 的 `Unknown` 路径有独立
+测试且未被接受为 proven。
 
 ---
 

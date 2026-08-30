@@ -944,4 +944,313 @@ LayoutProof checkInjectivity(Attribute map, ArrayRef<int64_t> domainShape) {
           "bounded enumeration found a unique output for every domain point"};
 }
 
+namespace {
+
+constexpr std::array<StringLiteral, 5> kCarrierNames = {
+    "register", "lane", "warp", "warp_group", "cta"};
+
+std::optional<unsigned> getCarrierIndex(StringRef name) {
+  for (auto [index, carrier] : llvm::enumerate(kCarrierNames)) {
+    if (name == carrier)
+      return index;
+  }
+  return std::nullopt;
+}
+
+void collectMapInputNames(Attribute map, SmallVectorImpl<StringRef> &names) {
+  auto append = [&](ArrayAttr values) {
+    for (Attribute value : values)
+      names.push_back(cast<StringAttr>(value).getValue());
+  };
+  if (auto affine = dyn_cast<AffineLayoutMapAttr>(map)) {
+    append(affine.getInputNames());
+    return;
+  }
+  if (auto bitLinear = dyn_cast<BitLinearLayoutMapAttr>(map)) {
+    append(bitLinear.getInputNames());
+    return;
+  }
+  if (auto product = dyn_cast<ProductLayoutMapAttr>(map)) {
+    collectMapInputNames(product.getOuter(), names);
+    collectMapInputNames(product.getInner(), names);
+  }
+}
+
+LogicalResult verifyStorageOutputNames(
+    function_ref<InFlightDiagnostic()> emitError, Attribute map) {
+  ArrayAttr names = getOutputNames(map);
+  if (!names || names.size() != 2 ||
+      cast<StringAttr>(names[0]).getValue() != "byte_offset" ||
+      cast<StringAttr>(names[1]).getValue() != "bit_offset")
+    return emitError()
+           << "storage map outputs must be ['byte_offset', 'bit_offset']";
+  if (auto affine = dyn_cast<AffineLayoutMapAttr>(map)) {
+    if (affine.getOutputExtents()[1] != 8)
+      return emitError() << "affine bit_offset extent must be 8";
+  } else if (auto bitLinear = dyn_cast<BitLinearLayoutMapAttr>(map)) {
+    if (bitLinear.getOutputBitWidths()[1] != 3)
+      return emitError() << "bit-linear bit_offset width must be 3";
+  }
+  return success();
+}
+
+LogicalResult verifyMapDomainMatchesType(Attribute map, ShapedType type,
+                                         Location loc) {
+  if (!type.hasRank() || !type.hasStaticShape())
+    return emitError(loc) << "layout verification requires a static ranked type";
+
+  if (auto affine = dyn_cast<AffineLayoutMapAttr>(map)) {
+    if (affine.getInputExtents().asArrayRef() != type.getShape())
+      return emitError(loc)
+             << "affine layout input extents must match the shaped type";
+    return success();
+  }
+  if (auto bitLinear = dyn_cast<BitLinearLayoutMapAttr>(map)) {
+    auto widths = bitLinear.getInputBitWidths().asArrayRef();
+    if (widths.size() != static_cast<size_t>(type.getRank()))
+      return emitError(loc)
+             << "bit-linear layout input rank must match the shaped type";
+    for (auto [extent, width] : llvm::zip_equal(type.getShape(), widths)) {
+      if (extent <= 0 || !llvm::isPowerOf2_64(extent) || width >= 63 ||
+          extent != (int64_t{1} << width))
+        return emitError(loc)
+               << "bit-linear input widths must exactly encode type extents";
+    }
+    return success();
+  }
+  return emitError(loc)
+         << "M1 type verification supports affine or bit-linear encoding maps";
+}
+
+} // namespace
+
+Attribute DistributedEncodingAttr::parse(AsmParser &parser, Type) {
+  llvm::SMLoc location = parser.getCurrentLocation();
+  Attribute map;
+  DenseI64ArrayAttr topology;
+  int64_t replication = 0;
+  if (parser.parseLess() || parser.parseKeyword("map") ||
+      parser.parseEqual() || parser.parseAttribute(map) || parser.parseComma() ||
+      parser.parseKeyword("topology") || parser.parseEqual() ||
+      parseI64List(parser, topology) || parser.parseComma() ||
+      parser.parseKeyword("replication") || parser.parseEqual() ||
+      parser.parseInteger(replication) || parser.parseGreater())
+    return {};
+  IntegerAttr replicationAttr =
+      parser.getBuilder().getI64IntegerAttr(replication);
+  return parser.getChecked<DistributedEncodingAttr>(
+      location, parser.getContext(), map, topology, replicationAttr);
+}
+
+void DistributedEncodingAttr::print(AsmPrinter &printer) const {
+  printer << "<map = " << getMap() << ", topology = ";
+  printI64List(printer, getTopology());
+  printer << ", replication = " << getReplication().getInt() << '>';
+}
+
+LogicalResult DistributedEncodingAttr::verify(
+    function_ref<InFlightDiagnostic()> emitError, Attribute map,
+    DenseI64ArrayAttr topology, IntegerAttr replication) {
+  if (!isa<LayoutMapAttrInterface>(map))
+    return emitError() << "distributed encoding map must implement "
+                          "LayoutMapAttrInterface";
+  if (topology.size() != kCarrierNames.size())
+    return emitError() << "topology must contain register, lane, warp, "
+                          "warp_group, and cta extents";
+  for (int64_t extent : topology.asArrayRef()) {
+    if (extent <= 0)
+      return emitError() << "topology extents must be positive";
+  }
+  if (topology[1] > 32)
+    return emitError() << "lane topology extent must not exceed 32 on SM90";
+  if (!replication || replication.getInt() <= 0)
+    return emitError() << "replication must be positive";
+
+  SmallVector<StringRef> inputs;
+  collectMapInputNames(map, inputs);
+  llvm::StringSet<> seen;
+  for (StringRef input : inputs) {
+    if (!getCarrierIndex(input))
+      return emitError() << "distributed layout contains unsupported carrier '"
+                         << input << "'";
+    if (!seen.insert(input).second)
+      return emitError() << "duplicate distributed carrier '" << input << "'";
+  }
+  return success();
+}
+
+FailureOr<Attribute>
+DistributedEncodingAttr::getCanonicalMap(ShapedType) const {
+  auto map = dyn_cast<LayoutMapAttrInterface>(getMap());
+  if (!map)
+    return failure();
+  return map.canonicalizeMap();
+}
+
+LogicalResult DistributedEncodingAttr::verifyForType(ShapedType type,
+                                                       Location loc) const {
+  if (!type.hasRank() || !type.hasStaticShape())
+    return emitError(loc)
+           << "distributed encoding requires a static ranked type in M1";
+  auto map = dyn_cast<BitLinearLayoutMapAttr>(getMap());
+  if (!map)
+    return emitError(loc)
+           << "M1 distributed type verification requires a bit-linear map";
+  if (map.getOutputBitWidths().size() !=
+      static_cast<size_t>(type.getRank()))
+    return emitError(loc)
+           << "distributed logical rank must match the shaped type";
+  for (auto [extent, width] : llvm::zip_equal(
+           type.getShape(), map.getOutputBitWidths().asArrayRef())) {
+    if (extent <= 0 || !llvm::isPowerOf2_64(extent) || width >= 63 ||
+        extent != (int64_t{1} << width))
+      return emitError(loc)
+             << "distributed output widths must exactly encode type extents";
+  }
+
+  uint64_t carrierCount = 1;
+  for (int64_t extent : getTopology().asArrayRef()) {
+    if (!llvm::isPowerOf2_64(extent) ||
+        carrierCount > std::numeric_limits<uint64_t>::max() /
+                           static_cast<uint64_t>(extent))
+      return emitError(loc)
+             << "bit-linear topology extents must be powers of two without "
+                "overflow";
+    carrierCount *= static_cast<uint64_t>(extent);
+  }
+  for (auto [nameAttr, width] : llvm::zip_equal(
+           map.getInputNames(), map.getInputBitWidths().asArrayRef())) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    std::optional<unsigned> index = getCarrierIndex(name);
+    if (!index || width >= 63 ||
+        getTopology()[*index] != (int64_t{1} << width))
+      return emitError(loc)
+             << "carrier bit width must exactly match its topology extent";
+  }
+
+  FailureOr<GF2Matrix> matrix = map.getMatrixValue();
+  if (failed(matrix))
+    return emitError(loc) << "distributed GF(2) matrix is malformed";
+  unsigned outputBits = 0;
+  for (int64_t width : map.getOutputBitWidths().asArrayRef())
+    outputBits += static_cast<unsigned>(width);
+  unsigned rank = matrix->rank();
+  if (rank != outputBits)
+    return emitError(loc)
+           << "distributed map does not cover the complete logical tile";
+  if (rank >= 64 || carrierCount % (uint64_t{1} << rank) != 0)
+    return emitError(loc)
+           << "distributed replication cannot be derived from topology";
+  uint64_t expectedReplication = carrierCount / (uint64_t{1} << rank);
+  if (getReplication().getValue().getLimitedValue() != expectedReplication)
+    return emitError(loc) << "replication does not match topology and map rank; "
+                             "expected "
+                          << expectedReplication;
+  return success();
+}
+
+LayoutKind DistributedEncodingAttr::getKind() const {
+  return LayoutKind::Distributed;
+}
+
+Attribute StorageLayoutAttr::parse(AsmParser &parser, Type) {
+  llvm::SMLoc location = parser.getCurrentLocation();
+  Attribute map;
+  MemorySpaceAttr memorySpace;
+  int64_t alignment = 0;
+  int64_t vectorGranularity = 0;
+  if (parser.parseLess() || parser.parseKeyword("map") ||
+      parser.parseEqual() || parser.parseAttribute(map) || parser.parseComma() ||
+      parser.parseKeyword("memory_space") || parser.parseEqual() ||
+      parser.parseAttribute(memorySpace) || parser.parseComma() ||
+      parser.parseKeyword("alignment") || parser.parseEqual() ||
+      parser.parseInteger(alignment) || parser.parseComma() ||
+      parser.parseKeyword("vector_granularity") || parser.parseEqual() ||
+      parser.parseInteger(vectorGranularity) || parser.parseGreater())
+    return {};
+  Builder &builder = parser.getBuilder();
+  return parser.getChecked<StorageLayoutAttr>(
+      location, parser.getContext(), map, memorySpace,
+      builder.getI64IntegerAttr(alignment),
+      builder.getI64IntegerAttr(vectorGranularity));
+}
+
+void StorageLayoutAttr::print(AsmPrinter &printer) const {
+  printer << "<map = " << getMap() << ", memory_space = " << getMemorySpace()
+          << ", alignment = " << getAlignment().getInt()
+          << ", vector_granularity = " << getVectorGranularity().getInt()
+          << '>';
+}
+
+LogicalResult StorageLayoutAttr::verify(
+    function_ref<InFlightDiagnostic()> emitError, Attribute map,
+    MemorySpaceAttr memorySpace, IntegerAttr alignment,
+    IntegerAttr vectorGranularity) {
+  if (!isa<LayoutMapAttrInterface>(map))
+    return emitError()
+           << "storage encoding map must implement LayoutMapAttrInterface";
+  if (!memorySpace || memorySpace.getValue() == attr::MemorySpace::Local)
+    return emitError() << "storage encoding requires shared or global memory";
+  auto isPositivePowerOfTwo = [](IntegerAttr value) {
+    return value && value.getInt() > 0 &&
+           llvm::isPowerOf2_64(static_cast<uint64_t>(value.getInt()));
+  };
+  if (!isPositivePowerOfTwo(alignment))
+    return emitError() << "alignment must be a positive power of two";
+  if (!isPositivePowerOfTwo(vectorGranularity))
+    return emitError()
+           << "vector granularity must be a positive power of two";
+  if (vectorGranularity.getInt() > alignment.getInt())
+    return emitError()
+           << "vector granularity must not exceed guaranteed alignment";
+  return verifyStorageOutputNames(emitError, map);
+}
+
+FailureOr<Attribute> StorageLayoutAttr::getCanonicalMap(ShapedType) const {
+  auto map = dyn_cast<LayoutMapAttrInterface>(getMap());
+  if (!map)
+    return failure();
+  return map.canonicalizeMap();
+}
+
+LogicalResult StorageLayoutAttr::verifyForType(ShapedType type,
+                                                Location loc) const {
+  auto memref = dyn_cast<MemRefType>(type);
+  if (!memref)
+    return emitError(loc) << "storage encoding requires a MemRefType";
+  std::optional<attr::MemorySpace> typeSpace =
+      attr::symbolizeMemorySpace(memref.getMemorySpaceAsInt());
+  if (!typeSpace || *typeSpace != getMemorySpace().getValue())
+    return emitError(loc)
+           << "storage encoding memory space must match the MemRefType";
+  if (failed(verifyMapDomainMatchesType(getMap(), type, loc)))
+    return failure();
+
+  LayoutProof injective = checkInjectivity(getMap(), type.getShape());
+  if (injective.status != ProofStatus::Proven)
+    return emitError(loc) << "storage map must be provably injective on the "
+                             "live logical domain: "
+                          << injective.reason;
+
+  bool offsetsValid = true;
+  if (failed(enumeratePoints(type.getShape(), [&](ArrayRef<int64_t> point) {
+        FailureOr<SmallVector<int64_t>> output =
+            evaluateLayout(getMap(), point);
+        if (failed(output) || output->size() != 2)
+          return failure();
+        offsetsValid &= (*output)[0] >= 0 && (*output)[1] >= 0 &&
+                        (*output)[1] < 8;
+        return success();
+      })))
+    return emitError(loc)
+           << "storage byte/bit offset bounds could not be proven";
+  if (!offsetsValid)
+    return emitError(loc)
+           << "storage map produced a negative byte offset or bit offset "
+              "outside [0, 8)";
+  return success();
+}
+
+LayoutKind StorageLayoutAttr::getKind() const { return LayoutKind::Storage; }
+
 } // namespace mlir::frisk

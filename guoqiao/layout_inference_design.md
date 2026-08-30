@@ -234,6 +234,51 @@ Encoding 展开不接收隐式 target 上下文：Distributed/Storage encoding �
 
 `MmaEncodingAttr` 和 `DotOperandEncodingAttr` 是指令契约，而不是另一套独立数学系统；它们必须可展开成 canonical layout map。这样 target-specific 属性不会污染通用 compose/equality/verifier。
 
+M1 固化的通用 encoding 文本与单位如下：
+
+```mlir
+#frisk.distributed<map = #map,
+  topology = [register, lane, warp, warp_group, cta], replication = R>
+#frisk.storage<map = #map,
+  memory_space = #frisk<memory_space Shared>,
+  alignment = A, vector_granularity = V>
+```
+
+- `topology` 中五项都是 carrier extent，不是 bit width；省略于 map 的 extent-1 carrier
+  仍保留在 topology 中。对 BitLinear distributed map，`replication` 必须严格等于
+  `product(topology) / 2^rank(B_D)`，因此零列/缺失 carrier 所代表的复制可被验证，不能
+  只凭一个独立数字声明。
+- Storage map 的输出名称和顺序固定为 `(byte_offset, bit_offset)`；Affine map 的
+  `bit_offset` extent 固定为 8，BitLinear map 的对应 width 固定为 3。
+- `alignment` 与 `vector_granularity` 均以 byte 为单位，必须是正的 2 次幂，且
+  `vector_granularity <= alignment`。Storage 仅绑定 Shared/Global MemRef，live logical
+  domain 上的地址必须可证明为单射，bit offset 必须位于 `[0, 8)`。
+- M1 的 native Distributed type verifier 已使用 hardware → logical 的 BitLinear
+  精确证明；legacy adapter 过渡期允许传入旧 Local MemRef 的 shape，M3 物化时公共
+  carrier 将收紧为带 encoding 的 RankedTensor SSA。
+
+### 5.5 M1 legacy adapter 的证明边界
+
+`LegacyLayoutAdapter` 是迁移期语义桥，不是第二套布局系统。它作为独立
+`FriskLegacyLayoutAdapter` 库依赖 `FriskIR`，避免让通用 `FriskAnalysis` 与 IR
+形成循环依赖。当前支持集固定为：
+
+- Distributed：静态、各逻辑 extent 为 2 次幂、legacy index/thread 均为单结果且
+  无 symbol、replication 为正的 2 次幂；枚举 `(logical -> thread/register)` 后求逆，
+  从 carrier basis 重建 GF(2) matrix，并对完整 domain 验证。replication 被编码为
+  topology 中映射到零的 carrier bit，矩阵 kernel 大小必须与旧值一致。
+- Storage：静态、无 thread map。legacy 多结果 physical tuple 先按逐维最大 extent
+  作规范 row-major flatten，再转换为 `(byte_offset, bit_offset)`；2 次幂 domain
+  优先从完整真值表恢复 GF(2) basis 并全域验证。只有旧 map 本身为单结果时才允许
+  linear/padded Affine fallback。
+- 单次迁移枚举最多 65,536 个 logical point。动态、超限、非 GF(2) 多结果 map、
+  不可逆 ownership 或任何无法证明的情况都诊断
+  `legacy layout cannot be represented by the canonical layout algebra`，不猜测布局。
+
+M1 差分门覆盖当前 SM90 `sm90_ss` 与 `sm90_rs`：shared A/B 地址和 local A/C
+ownership 均逐点比较。SM80 旧测试继续作为原生产路径回归保留，但不属于当前
+SM90-only adapter 的支持承诺。
+
 ## 6. 创新核心：Affine × BitLinear 组合布局代数
 
 ### 6.1 为什么不能只用 AffineMap

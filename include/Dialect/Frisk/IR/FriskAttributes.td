@@ -4,7 +4,6 @@
 include "Dialect/Frisk/IR/FriskDialect.td"
 include "mlir/IR/AttrTypeBase.td"
 include "Dialect/Frisk/IR/FriskEnums.td"
-include "Dialect/Frisk/IR/FriskLayoutAttrs.td"
 
 def MemorySpaceAttr : EnumAttr<Frisk_Dialect, MemorySpaceEnum, "memory_space"> {
     let cppNamespace = "::mlir::frisk";
@@ -14,6 +13,10 @@ def GemmWarpPolicyAttr : EnumAttr<Frisk_Dialect, GemmWarpPolicyEnum, "gemm_warp_
     let cppNamespace = "::mlir::frisk";
     let summary = "GEMM warp partitioning policy";
 }
+
+// Encoding attrs use the target-independent memory-space enum as a typed
+// parameter, so include them only after MemorySpaceAttr is declared.
+include "Dialect/Frisk/IR/FriskLayoutAttrs.td"
 
 def LayoutAttr : AttrDef<Frisk_Dialect, "Layout"> {
     let cppNamespace = "::mlir::frisk";
