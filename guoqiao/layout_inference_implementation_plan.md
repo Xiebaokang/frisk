@@ -899,7 +899,7 @@ output_bit_widths : DenseI64ArrayAttr
 matrix            : DenseIntElementsAttr<tensor<rows x cols x i1>>
 ```
 
-- [ ] **Step 1: 写 parse/verify 红灯测试**
+- [x] **Step 1: 写 parse/verify 红灯测试**
 
 测试包含一个合法 XOR map 和三个非法 map：matrix shape 错、重复 dimension name、bit width 为 0。
 
@@ -917,11 +917,11 @@ Run: `cmake --build build --target check-frisk --parallel 32`。
 
 Expected: FAIL，attribute 尚未定义。
 
-- [ ] **Step 2: 定义 ODS Attr 和 verifier**
+- [x] **Step 2: 定义 ODS Attr 和 verifier**
 
 Attr 实现 `LayoutMapAttrInterface`。Verifier 检查：名称唯一、name/width 数量一致、所有 width > 0、matrix 行数等于输出总 bit、列数等于输入总 bit。
 
-- [ ] **Step 3: 接入 GF2 algebra**
+- [x] **Step 3: 接入 GF2 algebra**
 
 实现：
 
@@ -936,7 +936,7 @@ composeBitLinear(BitLinearLayoutMapAttr lhs, BitLinearLayoutMapAttr rhs);
 
 Canonical form 保持命名维度顺序，但删除 width 为 0 的禁止状态、规范 DenseElements 存储并拒绝重复名称；不得按 hash 顺序重排。
 
-- [ ] **Step 4: 验证 parse/print、compose 和 replication**
+- [x] **Step 4: 验证 parse/print、compose 和 replication**
 
 Unit test 检查全零 input column 被识别为 kernel/replication，FileCheck 检查 parse-print 稳定。
 
@@ -950,7 +950,7 @@ cmake --build build --target FriskLayoutUnitTests check-frisk --parallel 32
 
 Expected: unit/lit tests PASS。
 
-- [ ] **Step 5: 提交 BitLinear Attr**
+- [x] **Step 5: 提交 BitLinear Attr**
 
 ```bash
 git add include/Dialect/Frisk/IR lib/Dialect/Frisk/IR test unittests

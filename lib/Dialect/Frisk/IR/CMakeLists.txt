@@ -1,6 +1,7 @@
 add_frisk_library(FriskIR
   FriskAttributes.cpp
   FriskEnums.cpp
+  FriskLayoutAttrs.cpp
   FriskLayoutInterfaces.cpp
   FriskOps.cpp
   FriskOps_Reduce.cpp
@@ -11,6 +12,7 @@ add_frisk_library(FriskIR
 
   LINK_LIBS PUBLIC
   MLIRIR
+  FriskAnalysis
   MLIRArithDialect
   MLIRMathDialect
   MLIRSCFDialect

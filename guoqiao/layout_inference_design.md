@@ -257,6 +257,12 @@ logical_i = outer_i * inner_extent_i + inner_i
 - `ProductLayoutMapAttr` 负责 direct-sum、compose 和 named-dimension 对齐。
 - 动态 shape 只作为 extent/bounds symbol 参与验证和 predicate，不允许动态值进入 encoding attribute 本体。
 
+`BitLinearLayoutMapAttr` 的位序是规范的一部分：input/output name 数组从左到右
+拼接各维 bit，维内按低位到高位排列；matrix 的列对应拼接后的 input bit，行对应
+拼接后的 output bit，并使用 row-major `tensor<rows x cols x i1>` 存储。input 和
+output 名称分别在各自集合内唯一，compose 通过名称及 bit width 对齐中间维度，
+不得依赖 hash/指针顺序。
+
 核心操作必须具备明确语义：
 
 - `compose(A, B)`：按命名维度组合映射；

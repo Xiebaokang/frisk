@@ -4,6 +4,7 @@
 include "Dialect/Frisk/IR/FriskDialect.td"
 include "mlir/IR/AttrTypeBase.td"
 include "Dialect/Frisk/IR/FriskEnums.td"
+include "Dialect/Frisk/IR/FriskLayoutAttrs.td"
 
 def MemorySpaceAttr : EnumAttr<Frisk_Dialect, MemorySpaceEnum, "memory_space"> {
     let cppNamespace = "::mlir::frisk";
