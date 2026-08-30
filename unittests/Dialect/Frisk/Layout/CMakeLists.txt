@@ -1,4 +1,5 @@
 add_unittest(FriskUnitTests FriskLayoutUnitTests
+  GF2MatrixTest.cpp
   LayoutInterfaceTest.cpp
 )
 
@@ -8,6 +9,7 @@ set_target_properties(FriskLayoutUnitTests PROPERTIES
 
 target_link_libraries(FriskLayoutUnitTests
   PRIVATE
+  FriskAnalysis
   FriskIR
   MLIRIR
 )

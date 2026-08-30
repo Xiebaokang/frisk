@@ -817,7 +817,7 @@ public:
 };
 ```
 
-- [ ] **Step 1: 写矩阵红灯测试**
+- [x] **Step 1: 写矩阵红灯测试**
 
 至少覆盖 identity、XOR、rank-deficient、inverse 和 compose 顺序：
 
@@ -840,7 +840,7 @@ cmake --build build --target FriskLayoutUnitTests --parallel 32
 
 Expected: FAIL，`GF2Matrix` 未定义。
 
-- [ ] **Step 2: 实现构造、apply、transpose 和 compose**
+- [x] **Step 2: 实现构造、apply、transpose 和 compose**
 
 内部使用 `SmallVector<APInt> rows`。乘加规则固定为：
 
@@ -850,11 +850,11 @@ bool bit = (rows[row] & input).popcount() & 1;
 
 `lhs.compose(rhs)` 表示 `lhs(rhs(x))`；维度不匹配返回 failure，不截断 APInt。
 
-- [ ] **Step 3: 实现消元、kernel、inverse/right-inverse**
+- [x] **Step 3: 实现消元、kernel、inverse/right-inverse**
 
 使用确定性 Gauss-Jordan：pivot 按 column 从小到大、row 从小到大选择。`inverse()` 仅方阵满秩成功；`rightInverse()` 仅输出空间被覆盖时成功。
 
-- [ ] **Step 4: 增加穷举 oracle 并验证**
+- [x] **Step 4: 增加穷举 oracle 并验证**
 
 对输入 bit 数不超过 8 的矩阵枚举所有输入，比较 `compose/apply`；对可逆矩阵验证 `A.inverse()(A(x)) == x`。
 
@@ -868,7 +868,7 @@ cmake --build build --target FriskLayoutUnitTests --parallel 32
 
 Expected: 所有 GF2Matrix tests PASS。
 
-- [ ] **Step 5: 提交 GF(2) 核心**
+- [x] **Step 5: 提交 GF(2) 核心**
 
 ```bash
 git add include/Dialect/Frisk/Analysis lib/Dialect/Frisk/Analysis unittests
