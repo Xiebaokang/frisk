@@ -19,6 +19,7 @@
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "Dialect/Frisk/IR/FriskDialect.h.inc"
 #include "Dialect/Frisk/IR/FriskAttributes.h"

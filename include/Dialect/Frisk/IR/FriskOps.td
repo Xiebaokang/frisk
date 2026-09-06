@@ -16,6 +16,7 @@ include "mlir/IR/OpAsmInterface.td" // OpAsmOpInterface
 include "mlir/Interfaces/FunctionInterfaces.td" // FunctionOpInterface
 include "mlir/Interfaces/SideEffectInterfaces.td" // Pure
 include "mlir/Interfaces/ControlFlowInterfaces.td" // ReturnLike
+include "mlir/Interfaces/ViewLikeInterface.td"
 
 include "mlir/Interfaces/InferTypeOpInterface.td" // SameOperandsAndResultRank
 
@@ -23,6 +24,8 @@ include "mlir/Interfaces/InferTypeOpInterface.td" // SameOperandsAndResultRank
 // Op Base
 class Frisk_Op<string mnemonic, list<Trait> traits = []> : 
   Op<Frisk_Dialect, mnemonic, traits>;
+
+include "Dialect/Frisk/IR/FriskLayoutOps.td"
 
 def ImplicitFriskTerminator : SingleBlockImplicitTerminator<"EndOp">;
 
