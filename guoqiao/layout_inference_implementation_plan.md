@@ -190,7 +190,7 @@ benchmark/layout/solver/
 - Consumes: 当前 `FriskIR`、`frisk_attr_test`、`frisk_reduce_layout_test`。
 - Produces: `ctest --test-dir build` 可发现并运行两个 legacy baseline；后续所有任务使用同一入口做回归。
 
-- [x] **Step 1: 记录当前测试发现状态**
+- [X] **Step 1: 记录当前测试发现状态**
 
 Run:
 
@@ -200,7 +200,7 @@ ctest --test-dir build -N
 
 Expected: 输出 `Total Tests: 0`，证明当前 CMake 尚未注册测试。
 
-- [x] **Step 2: 运行两个现有可执行测试并保存基线结论**
+- [X] **Step 2: 运行两个现有可执行测试并保存基线结论**
 
 Run:
 
@@ -211,7 +211,7 @@ Run:
 
 Expected: 两个进程退出码均为 0；将覆盖的 target/shape/reduce case 和当前已知限制写入 `guoqiao/layout_baseline.md`，不得复制大段日志。
 
-- [x] **Step 3: 注册 CTest**
+- [X] **Step 3: 注册 CTest**
 
 在顶层 `CMakeLists.txt` 的 `project` 命令后加入：
 
@@ -227,7 +227,7 @@ add_test(NAME FriskAttrTest COMMAND frisk_attr_test)
 add_test(NAME FriskReduceLayoutTest COMMAND frisk_reduce_layout_test)
 ```
 
-- [x] **Step 4: 重新配置并验证测试发现**
+- [X] **Step 4: 重新配置并验证测试发现**
 
 Run:
 
@@ -243,7 +243,7 @@ ctest --test-dir build --output-on-failure
 
 Expected: `100% tests passed, 0 tests failed out of 2`。
 
-- [x] **Step 5: 提交基线**
+- [X] **Step 5: 提交基线**
 
 ```bash
 git add CMakeLists.txt test_pass/CMakeLists.txt guoqiao/layout_baseline.md
@@ -266,7 +266,7 @@ git commit -m "test: register legacy layout baselines"
 - Consumes: MLIR `OperationPass<FunctionOpInterface>`、生成的 `impl::FriskInferLayoutsBase`。
 - Produces: `std::unique_ptr<Pass> createFriskInferLayoutsPass()` 和注册参数 `frisk-infer-layouts`。
 
-- [x] **Step 1: 写会失败的 pass 构造测试**
+- [X] **Step 1: 写会失败的 pass 构造测试**
 
 创建 `test_pass/layout_pass_test.cpp`，核心断言为：
 
@@ -289,7 +289,7 @@ cmake --build build --target frisk_layout_pass_test --parallel 32
 
 Expected: FAIL，原因是 target/`createFriskInferLayoutsPass` 尚不存在。
 
-- [x] **Step 2: 统一 pass 名称和构造器**
+- [X] **Step 2: 统一 pass 名称和构造器**
 
 将 `Passes.td` 定义改为：
 
@@ -308,7 +308,7 @@ def FriskInferLayouts : InterfacePass<"frisk-infer-layouts", "FunctionOpInterfac
 std::unique_ptr<Pass> createFriskInferLayoutsPass();
 ```
 
-- [x] **Step 3: 实现最小可运行 pass**
+- [X] **Step 3: 实现最小可运行 pass**
 
 `LayoutInfer.cpp` 使用生成基类：
 
@@ -331,7 +331,7 @@ std::unique_ptr<Pass> createFriskInferLayoutsPass() {
 
 将 `LayoutInfer.cpp` 加入 `FriskTransforms` source list，并链接 `MLIRFuncDialect`、`MLIRIR`、`MLIRPass`、`FriskIR`。
 
-- [x] **Step 4: 注册并运行测试**
+- [X] **Step 4: 注册并运行测试**
 
 在 `test_pass/CMakeLists.txt` 新增 `frisk_layout_pass_test`，链接 `FriskTransforms`，并注册 CTest。
 
@@ -344,7 +344,7 @@ ctest --test-dir build -R FriskLayoutPassTest --output-on-failure
 
 Expected: `FriskLayoutPassTest` PASS。
 
-- [x] **Step 5: 提交 pass 驱动**
+- [X] **Step 5: 提交 pass 驱动**
 
 ```bash
 git add include/Dialect/Frisk/Transforms lib/Dialect/Frisk/Transforms test_pass
@@ -369,7 +369,7 @@ git commit -m "feat: add executable layout inference pass"
 - Consumes: `FriskDialect`、`registerFriskPasses()`、`MlirOptMain`。
 - Produces: `build/bin/frisk-opt` 和 `check-frisk` target。
 
-- [x] **Step 1: 写命令行 smoke test**
+- [X] **Step 1: 写命令行 smoke test**
 
 创建：
 
@@ -393,7 +393,7 @@ cmake --build build --target check-frisk --parallel 32
 
 Expected: FAIL，原因是 `check-frisk`/`frisk-opt` 尚不存在。
 
-- [x] **Step 2: 实现 opt driver**
+- [X] **Step 2: 实现 opt driver**
 
 `tools/frisk-opt/frisk-opt.cpp`：
 
@@ -441,7 +441,7 @@ target_link_libraries(frisk-opt PRIVATE
 )
 ```
 
-- [x] **Step 3: 配置 lit**
+- [X] **Step 3: 配置 lit**
 
 `test/lit.cfg.py` 必须配置：
 
@@ -473,7 +473,7 @@ add_lit_testsuite(check-frisk "Running Frisk regression tests"
 
 顶层增加 `add_subdirectory(tools)` 与 `add_subdirectory(test)`。
 
-- [x] **Step 4: 验证 driver 和 lit**
+- [X] **Step 4: 验证 driver 和 lit**
 
 Run:
 
@@ -488,7 +488,7 @@ cmake --build build --target frisk-opt check-frisk --parallel 32
 
 Expected: lit 报告 `1 passed`。
 
-- [x] **Step 5: 提交测试入口**
+- [X] **Step 5: 提交测试入口**
 
 ```bash
 git add CMakeLists.txt tools test
@@ -509,7 +509,7 @@ git commit -m "test: add frisk-opt and lit harness"
 - Consumes: MLIR `MemoryEffectOpInterface`、`RecursiveMemoryEffects`。
 - Produces: Alloc/Copy/Fill/Gemm/Reduce 的准确 Allocate/Read/Write effect；Kernel/Parallel/Block/For 递归暴露 region effects。
 
-- [x] **Step 1: 写失败的 effect 测试**
+- [X] **Step 1: 写失败的 effect 测试**
 
 测试构造 Copy、Fill、Gemm、Reduce、Alloc，并断言：
 
@@ -530,7 +530,7 @@ cmake --build build --target frisk_memory_effect_test --parallel 32
 
 Expected: FAIL，因为现有 ODS 把多个内存 Op 标记为 `Pure`。
 
-- [x] **Step 2: 修正 ODS effects**
+- [X] **Step 2: 修正 ODS effects**
 
 采用以下边界：
 
@@ -555,7 +555,7 @@ Res<AnyMemRef, "", [MemAlloc]>:$result
 
 Gemm 的 A/B 为 `MemRead`，C 为 `MemRead, MemWrite`；Reduce 的 src 为 `MemRead`、dst 为 `MemWrite`；Copy/FIll 使用现有 operand effect 并删除 `Pure`。
 
-- [x] **Step 3: 生成、编译并运行 effect 测试**
+- [X] **Step 3: 生成、编译并运行 effect 测试**
 
 Run:
 
@@ -566,7 +566,7 @@ ctest --test-dir build -R FriskMemoryEffectTest --output-on-failure
 
 Expected: PASS。
 
-- [x] **Step 4: 运行 M0 全量回归**
+- [X] **Step 4: 运行 M0 全量回归**
 
 Run:
 
@@ -577,7 +577,7 @@ cmake --build build --target check-frisk --parallel 32
 
 Expected: 所有 CTest 和 lit tests PASS。
 
-- [x] **Step 5: 提交 MemoryEffect 修复**
+- [X] **Step 5: 提交 MemoryEffect 修复**
 
 ```bash
 git add include/Dialect/Frisk/IR/FriskOps.td test_pass guoqiao/layout_inference_design.md
@@ -685,7 +685,7 @@ class LayoutConstraintOpInterface;
 class LayoutConstraintBuilder;
 ```
 
-- [x] **Step 1: 写 Interface 生成失败测试**
+- [X] **Step 1: 写 Interface 生成失败测试**
 
 测试包含新头文件并做静态检查：
 
@@ -702,7 +702,7 @@ cmake --build build --target FriskLayoutUnitTests --parallel 32
 
 Expected: FAIL，原因是头文件和 unit test target 尚不存在。
 
-- [x] **Step 2: 定义公共结果类型**
+- [X] **Step 2: 定义公共结果类型**
 
 `LayoutCommon.h` 定义上述枚举，并增加：
 
@@ -717,7 +717,7 @@ using LayoutMapAttr = LayoutMapAttrInterface;
 
 `extent == ShapedType::kDynamic` 只允许出现在 affine outer；BitLinear 的 bit width 必须静态。
 
-- [x] **Step 3: 定义 Attr/Encoding 接口**
+- [X] **Step 3: 定义 Attr/Encoding 接口**
 
 `FriskLayoutAttrInterfaces.td` 至少声明：
 
@@ -748,7 +748,7 @@ def LayoutEncodingAttrInterface : AttrInterface<"LayoutEncodingAttrInterface"> {
 
 `FriskLayoutOpInterfaces.td` 声明 `collectLayoutConstraints(LayoutConstraintBuilder&)`；此时只生成声明，Task 11 再提供 builder 实现。
 
-- [x] **Step 4: 接入 TableGen 和 unit test**
+- [X] **Step 4: 接入 TableGen 和 unit test**
 
 为 Attr interface 和 Op interface 分别生成 decl/def，避免两个 generator 写同一文件；`FriskIR` 增加 `FriskLayoutInterfaces.cpp`。Unit test 使用：
 
@@ -777,7 +777,7 @@ cmake --build build --target FriskLayoutUnitTests --parallel 32
 
 Expected: unit test PASS。
 
-- [x] **Step 5: 提交接口骨架**
+- [X] **Step 5: 提交接口骨架**
 
 ```bash
 git add include/Dialect/Frisk lib/Dialect/Frisk unittests CMakeLists.txt
@@ -817,7 +817,7 @@ public:
 };
 ```
 
-- [x] **Step 1: 写矩阵红灯测试**
+- [X] **Step 1: 写矩阵红灯测试**
 
 至少覆盖 identity、XOR、rank-deficient、inverse 和 compose 顺序：
 
@@ -840,7 +840,7 @@ cmake --build build --target FriskLayoutUnitTests --parallel 32
 
 Expected: FAIL，`GF2Matrix` 未定义。
 
-- [x] **Step 2: 实现构造、apply、transpose 和 compose**
+- [X] **Step 2: 实现构造、apply、transpose 和 compose**
 
 内部使用 `SmallVector<APInt> rows`。乘加规则固定为：
 
@@ -850,11 +850,11 @@ bool bit = (rows[row] & input).popcount() & 1;
 
 `lhs.compose(rhs)` 表示 `lhs(rhs(x))`；维度不匹配返回 failure，不截断 APInt。
 
-- [x] **Step 3: 实现消元、kernel、inverse/right-inverse**
+- [X] **Step 3: 实现消元、kernel、inverse/right-inverse**
 
 使用确定性 Gauss-Jordan：pivot 按 column 从小到大、row 从小到大选择。`inverse()` 仅方阵满秩成功；`rightInverse()` 仅输出空间被覆盖时成功。
 
-- [x] **Step 4: 增加穷举 oracle 并验证**
+- [X] **Step 4: 增加穷举 oracle 并验证**
 
 对输入 bit 数不超过 8 的矩阵枚举所有输入，比较 `compose/apply`；对可逆矩阵验证 `A.inverse()(A(x)) == x`。
 
@@ -868,7 +868,7 @@ cmake --build build --target FriskLayoutUnitTests --parallel 32
 
 Expected: 所有 GF2Matrix tests PASS。
 
-- [x] **Step 5: 提交 GF(2) 核心**
+- [X] **Step 5: 提交 GF(2) 核心**
 
 ```bash
 git add include/Dialect/Frisk/Analysis lib/Dialect/Frisk/Analysis unittests
@@ -899,7 +899,7 @@ output_bit_widths : DenseI64ArrayAttr
 matrix            : DenseIntElementsAttr<tensor<rows x cols x i1>>
 ```
 
-- [x] **Step 1: 写 parse/verify 红灯测试**
+- [X] **Step 1: 写 parse/verify 红灯测试**
 
 测试包含一个合法 XOR map 和三个非法 map：matrix shape 错、重复 dimension name、bit width 为 0。
 
@@ -917,11 +917,11 @@ Run: `cmake --build build --target check-frisk --parallel 32`。
 
 Expected: FAIL，attribute 尚未定义。
 
-- [x] **Step 2: 定义 ODS Attr 和 verifier**
+- [X] **Step 2: 定义 ODS Attr 和 verifier**
 
 Attr 实现 `LayoutMapAttrInterface`。Verifier 检查：名称唯一、name/width 数量一致、所有 width > 0、matrix 行数等于输出总 bit、列数等于输入总 bit。
 
-- [x] **Step 3: 接入 GF2 algebra**
+- [X] **Step 3: 接入 GF2 algebra**
 
 实现：
 
@@ -936,7 +936,7 @@ composeBitLinear(BitLinearLayoutMapAttr lhs, BitLinearLayoutMapAttr rhs);
 
 Canonical form 保持命名维度顺序，但删除 width 为 0 的禁止状态、规范 DenseElements 存储并拒绝重复名称；不得按 hash 顺序重排。
 
-- [x] **Step 4: 验证 parse/print、compose 和 replication**
+- [X] **Step 4: 验证 parse/print、compose 和 replication**
 
 Unit test 检查全零 input column 被识别为 kernel/replication，FileCheck 检查 parse-print 稳定。
 
@@ -950,7 +950,7 @@ cmake --build build --target FriskLayoutUnitTests check-frisk --parallel 32
 
 Expected: unit/lit tests PASS。
 
-- [x] **Step 5: 提交 BitLinear Attr**
+- [X] **Step 5: 提交 BitLinear Attr**
 
 ```bash
 git add include/Dialect/Frisk/IR lib/Dialect/Frisk/IR test unittests
@@ -988,7 +988,7 @@ LayoutProof checkCoverage(Attribute map, ArrayRef<int64_t> logicalShape);
 LayoutProof checkInjectivity(Attribute map, ArrayRef<int64_t> domainShape);
 ```
 
-- [x] **Step 1: 写 non-power-of-two 与 carry 红灯测试**
+- [X] **Step 1: 写 non-power-of-two 与 carry 红灯测试**
 
 测试概念语义 `logical = outer * innerExtent + inner`；Attr 中将 Affine outer
 规范存为已缩放的 `outer_base = outer * innerExtent`，实际求值为
@@ -999,11 +999,11 @@ Run: `cmake --build build --target FriskLayoutUnitTests --parallel 32`。
 
 Expected: FAIL，Affine/Product API 尚不存在。
 
-- [x] **Step 2: 实现 `AffineLayoutMapAttr` verifier**
+- [X] **Step 2: 实现 `AffineLayoutMapAttr` verifier**
 
 检查 AffineMap dim 数、symbol 数、name/extent 数量、正静态 extent 或 `ShapedType::kDynamic`。动态 extent 只允许作为 symbol/bounds，不得进入 BitLinear matrix。
 
-- [x] **Step 3: 实现 Product compose 和 canonicalization**
+- [X] **Step 3: 实现 Product compose 和 canonicalization**
 
 固定组合流程：
 
@@ -1019,7 +1019,7 @@ Expected: FAIL，Affine/Product API 尚不存在。
 Product verifier 无法证明无 carry时直接拒绝构造；独立 proof API 对动态/超限情形返回
 `ProofStatus::Unknown`，不得生成不安全 Product，也不得把 `Unknown` 当作成功。
 
-- [x] **Step 4: 运行枚举 oracle**
+- [X] **Step 4: 运行枚举 oracle**
 
 对每维 extent 不超过 8 的 product map 枚举 `(outer, inner)`，比较 canonical map 与逐层求值；覆盖 transpose、projection、padding、ragged。
 
@@ -1037,7 +1037,7 @@ cmake --build build --target FriskLayoutUnitTests check-frisk --parallel 32
 
 Expected: PASS。
 
-- [x] **Step 5: 提交组合代数**
+- [X] **Step 5: 提交组合代数**
 
 ```bash
 git add include/Dialect/Frisk lib/Dialect/Frisk test unittests
@@ -1095,7 +1095,7 @@ ODS assembly format 固定为命名字段；后续测试中的 `#smem_layout` �
 
 `topology` 的字段顺序固定为 `(register, lane, warp, warp_group, cta)`；parser、printer 和 verifier 共同使用这一顺序，禁止依靠调用点注释猜测。
 
-- [x] **Step 1: 写 type verifier 和 baseline conversion 红灯测试**
+- [X] **Step 1: 写 type verifier 和 baseline conversion 红灯测试**
 
 测试：encoding logical shape 不匹配、Storage map 非单射、shared alignment 非正、现有 `sm90_ss` Gemm A/B/C legacy layout 转换。
 
@@ -1103,14 +1103,14 @@ Run: `cmake --build build --target FriskLayoutUnitTests --parallel 32`。
 
 Expected: FAIL，新 Encoding/adapter 不存在。
 
-- [x] **Step 2: 实现 Encoding verifier**
+- [X] **Step 2: 实现 Encoding verifier**
 
 Distributed 检查 carrier names 只来自 `register/lane/warp/warp_group/cta`、coverage、replication 与 topology；对 BitLinear map 精确验证
 `replication = product(topology) / 2^rank(B_D)`。Storage 检查 memory space、live
 domain injectivity、`(byte_offset, bit_offset)`、byte 单位的 alignment/vector
 granularity。
 
-- [x] **Step 3: 实现显式支持集的 legacy adapter**
+- [X] **Step 3: 实现显式支持集的 legacy adapter**
 
 Adapter 仅支持当前 SM90 baseline 中可证明的静态 2 次幂 fragment、linear/padded
 shared 和能从完整真值表恢复 GF(2) basis 的 swizzle。SM80 旧路径继续回归，但不作为
@@ -1128,7 +1128,7 @@ return emitError(loc)
 tuple 采用由各结果最大 extent 确定的 row-major flatten；只有单结果 map 可进入
 Affine fallback。枚举上限为 65,536，超限返回 failure。
 
-- [x] **Step 4: 对现有 baseline 做等价枚举**
+- [X] **Step 4: 对现有 baseline 做等价枚举**
 
 对每个 `(thread, register)` 和 logical shared point，比较 legacy 与新 canonical map；测试失败必须打印首个反例。
 
@@ -1143,7 +1143,7 @@ cmake --build build --target FriskLayoutUnitTests check-frisk --parallel 32
 Expected: `sm90_ss` 和 `sm90_rs` 所有已转换 operand PASS；其中 `sm90_rs` A 的
 legacy `replicate=2` 必须成为一个零 carrier bit，并由 GF(2) rank 验证为 2。
 
-- [x] **Step 5: 维护设计文档并提交**
+- [X] **Step 5: 维护设计文档并提交**
 
 如果最终 Attr 参数或 canonicalization 与设计文档 Section 5/6 不同，先同步修改。
 
