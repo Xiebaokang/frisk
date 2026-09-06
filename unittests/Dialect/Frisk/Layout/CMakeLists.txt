@@ -3,6 +3,7 @@ add_unittest(FriskUnitTests FriskLayoutUnitTests
   GF2MatrixTest.cpp
   LayoutEncodingTest.cpp
   LayoutInterfaceTest.cpp
+  LayoutConstraintTest.cpp
   LegacyLayoutAdapterTest.cpp
   ProductLayoutTest.cpp
 )

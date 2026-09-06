@@ -1,5 +1,6 @@
 add_frisk_library(FriskAnalysis
   LayoutAlgebra.cpp
+  LayoutConstraint.cpp
 
   LINK_LIBS PUBLIC
   MLIRIR
