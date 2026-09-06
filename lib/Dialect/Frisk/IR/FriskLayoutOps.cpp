@@ -11,7 +11,8 @@ namespace {
 
 bool isIdentityStorageLayout(StorageLayoutAttr layout, MemRefType type) {
   auto affine = dyn_cast<AffineLayoutMapAttr>(layout.getMap());
-  if (!affine || !type.hasStaticShape())
+  if (!affine || !type.hasStaticShape() || !type.getLayout().isIdentity() ||
+      !type.getElementType().isIntOrFloat())
     return false;
 
   unsigned elementBits = type.getElementTypeBitWidth();
@@ -31,9 +32,9 @@ bool isIdentityStorageLayout(StorageLayoutAttr layout, MemRefType type) {
   return affine.getAffineMap().getValue() == expected;
 }
 
-bool hasDownstreamLayoutAnchor(LayoutViewOp op) {
+bool hasNonReturnUser(LayoutViewOp op) {
   return llvm::any_of(op.getResult().getUsers(), [&](Operation *user) {
-    return user->getDialect() == op->getDialect();
+    return user->getName().getStringRef() != "func.return";
   });
 }
 
@@ -55,7 +56,7 @@ LogicalResult LayoutViewOp::canonicalize(LayoutViewOp op,
   if (StorageLayoutAttr layout = op.getLayoutAttr()) {
     if (isIdentityStorageLayout(
             layout, cast<MemRefType>(op.getResult().getType())) &&
-        !hasDownstreamLayoutAnchor(op)) {
+        !hasNonReturnUser(op)) {
       rewriter.replaceOp(op, op.getSource());
       return success();
     }

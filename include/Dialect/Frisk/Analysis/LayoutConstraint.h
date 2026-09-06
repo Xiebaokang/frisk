@@ -4,6 +4,7 @@
 #include "Dialect/Frisk/Analysis/LayoutCommon.h"
 
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 
@@ -23,6 +24,8 @@ namespace mlir::frisk {
 using LayoutVarID = uint32_t;
 using LayoutConstraintID = uint32_t;
 using ProvenanceID = uint32_t;
+inline constexpr ProvenanceID kInvalidProvenanceID =
+    std::numeric_limits<ProvenanceID>::max();
 
 enum class LayoutState { Uninitialized, CandidateSet, Resolved, Conflict };
 enum class ConstraintStrength { Hard, Soft };
@@ -40,7 +43,7 @@ enum class ConstraintKind {
 
 struct LayoutCandidate {
   Attribute value;
-  ProvenanceID provenance = 0;
+  ProvenanceID provenance = kInvalidProvenanceID;
   uint64_t stableOrdinal = 0;
 };
 

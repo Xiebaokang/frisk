@@ -13,6 +13,12 @@ bool storageMapsAgree(StorageLayoutAttr lhs, StorageLayoutAttr rhs) {
   return lhs && rhs && lhs.getMap() == rhs.getMap();
 }
 
+Value getLayoutViewAliasRoot(Value value) {
+  while (auto view = value.getDefiningOp<LayoutViewOp>())
+    value = view.getSource();
+  return value;
+}
+
 } // namespace
 
 LogicalResult materializeLayouts(Operation *,
@@ -57,7 +63,25 @@ LogicalResult verifyMaterializedLayouts(Operation *root,
       valid = false;
       return;
     }
-    auto [it, inserted] = layoutBySource.try_emplace(view.getSource(), layout);
+    auto type = cast<MemRefType>(view.getSource().getType());
+    FailureOr<uint64_t> required = getStorageFootprintBytes(layout, type);
+    FailureOr<uint64_t> capacity = getMemRefStaticCapacityBytes(type);
+    if (failed(required) || failed(capacity)) {
+      view.emitOpError(
+          "cannot prove storage layout footprint fits the underlying memref "
+          "type");
+      valid = false;
+      return;
+    }
+    if (*required > *capacity) {
+      view.emitOpError("storage layout requires ")
+          << *required << " bytes but underlying memref type provides "
+          << *capacity << " bytes";
+      valid = false;
+      return;
+    }
+    Value aliasRoot = getLayoutViewAliasRoot(view.getSource());
+    auto [it, inserted] = layoutBySource.try_emplace(aliasRoot, layout);
     if (!inserted && it->second != layout) {
       view.emitOpError("alias layout views have inconsistent bindings");
       valid = false;

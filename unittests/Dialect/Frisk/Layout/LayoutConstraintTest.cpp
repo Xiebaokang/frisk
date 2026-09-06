@@ -81,4 +81,14 @@ TEST(LayoutConstraintTest, PrintsProvenanceFromLeafToRoot) {
   EXPECT_NE(text.find("seed: explicit layout"), std::string::npos);
 }
 
+TEST(LayoutConstraintTest, RejectsProvenanceCycles) {
+  MLIRContext context;
+  Location loc = UnknownLoc::get(&context);
+  LayoutConstraintGraph graph;
+  graph.addProvenance(ProvenanceID{1}, nullptr, "first", "cycle");
+  graph.addProvenance(ProvenanceID{0}, nullptr, "second", "cycle");
+
+  EXPECT_TRUE(failed(graph.verifyInvariants(loc)));
+}
+
 } // namespace

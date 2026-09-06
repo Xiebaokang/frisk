@@ -163,15 +163,35 @@ LogicalResult LayoutConstraintGraph::verifyInvariants(Location loc) const {
                               << id;
     if (constraint.provenance >= provenances.size())
       return emitError(loc) << "layout constraint has invalid provenance";
-    if (constraint.kind == ConstraintKind::RequireEncoding &&
-        !constraint.requiredEncoding)
-      return emitError(loc)
-             << "require-encoding constraint is missing its encoding";
+    if (constraint.kind == ConstraintKind::RequireEncoding) {
+      if (constraint.vars.size() != 1)
+        return emitError(loc)
+               << "require-encoding constraint must reference exactly one "
+                  "variable";
+      if (!constraint.requiredEncoding)
+        return emitError(loc)
+               << "require-encoding constraint is missing its encoding";
+    }
+    if (isCommutativeConstraint(constraint.kind) &&
+        constraint.vars.size() < 2)
+      return emitError(loc) << "layout equality constraint '"
+                            << stringifyConstraintKind(constraint.kind)
+                            << "' must reference at least two variables";
   }
 
-  for (const LayoutProvenance &provenance : provenances)
+  for (const LayoutProvenance &provenance : provenances) {
     if (provenance.parent && *provenance.parent >= provenances.size())
       return emitError(loc) << "layout provenance has invalid parent";
+    llvm::SmallDenseSet<ProvenanceID, 8> visited;
+    const LayoutProvenance *current = &provenance;
+    while (current->parent) {
+      if (!visited.insert(current->id).second)
+        return emitError(loc) << "layout provenance contains a cycle";
+      if (*current->parent >= provenances.size())
+        return emitError(loc) << "layout provenance has invalid parent";
+      current = &provenances[*current->parent];
+    }
+  }
   return success();
 }
 

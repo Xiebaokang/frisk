@@ -4,7 +4,6 @@
 
 #include "Dialect/Frisk/IR/FriskAttributes.h"
 
-#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/STLExtras.h"
 
 #include "mlir/IR/Diagnostics.h"
@@ -23,6 +22,13 @@ bool candidatesCompatible(ConstraintKind kind, Attribute lhs, Attribute rhs) {
   return lhs == rhs;
 }
 
+bool isSupportedBootstrapHardConstraint(ConstraintKind kind) {
+  return kind == ConstraintKind::RequireEncoding ||
+         kind == ConstraintKind::SameLayout ||
+         kind == ConstraintKind::AliasLayout ||
+         kind == ConstraintKind::StorageAccess;
+}
+
 bool satisfiesConstraint(const LayoutConstraint &constraint,
                          const DenseMap<LayoutVarID, Attribute> &assignment,
                          bool requireComplete) {
@@ -35,10 +41,8 @@ bool satisfiesConstraint(const LayoutConstraint &constraint,
   if (constraint.kind == ConstraintKind::RequireEncoding)
     return assignment.lookup(constraint.vars.front()) ==
            constraint.requiredEncoding;
-  if (constraint.kind != ConstraintKind::SameLayout &&
-      constraint.kind != ConstraintKind::AliasLayout &&
-      constraint.kind != ConstraintKind::StorageAccess)
-    return true;
+  if (!isSupportedBootstrapHardConstraint(constraint.kind))
+    return false;
   for (size_t index = 1; index < constraint.vars.size(); ++index)
     if (!candidatesCompatible(
             constraint.kind, assignment.lookup(constraint.vars.front()),
@@ -56,6 +60,29 @@ LogicalResult emitSolverLimit(const LayoutVar &var, StringRef detail) {
   return emitError(getVariableLoc(var))
          << "bootstrap layout solver limit exceeded for " << var.stableName
          << ": " << detail;
+}
+
+LogicalResult verifyStorageCapacity(const LayoutVar &var,
+                                    Attribute candidate) {
+  if (var.kind != LayoutKind::Storage)
+    return success();
+  Location loc = getVariableLoc(var);
+  auto type = dyn_cast<MemRefType>(var.shapedType);
+  auto storage = dyn_cast<StorageLayoutAttr>(candidate);
+  if (!type || !storage)
+    return emitError(loc) << "storage solution for " << var.stableName
+                          << " has an incompatible type or encoding";
+  FailureOr<uint64_t> required = getStorageFootprintBytes(storage, type);
+  FailureOr<uint64_t> capacity = getMemRefStaticCapacityBytes(type);
+  if (failed(required) || failed(capacity))
+    return emitError(loc)
+           << "cannot prove storage layout footprint for " << var.stableName
+           << " fits the underlying memref type";
+  if (*required > *capacity)
+    return emitError(loc) << "storage layout requires " << *required
+                          << " bytes but underlying memref type provides "
+                          << *capacity << " bytes for " << var.stableName;
+  return success();
 }
 
 SmallVector<SmallVector<LayoutVarID>>
@@ -101,6 +128,22 @@ getHardConstraintComponents(const LayoutConstraintGraph &graph) {
 FailureOr<LayoutSolution>
 solveBootstrapLayoutGraph(LayoutConstraintGraph &graph, LayoutTarget &,
                           BootstrapSolverLimits limits) {
+  for (const LayoutConstraint &constraint : graph.getConstraints()) {
+    if (constraint.strength != ConstraintStrength::Hard ||
+        isSupportedBootstrapHardConstraint(constraint.kind))
+      continue;
+    const LayoutProvenance &provenance =
+        graph.getProvenances()[constraint.provenance];
+    Location loc = provenance.source
+                       ? provenance.source->getLoc()
+                       : UnknownLoc::get(graph.getVariable(
+                                                 constraint.vars.front())
+                                             .shapedType.getContext());
+    emitError(loc) << "bootstrap layout solver does not support hard "
+                      "constraint '"
+                   << stringifyConstraintKind(constraint.kind) << "'";
+    return failure();
+  }
   LayoutSolution solution;
   for (SmallVector<LayoutVarID> &component :
        getHardConstraintComponents(graph)) {
@@ -187,7 +230,10 @@ LogicalResult verifySolvedLayoutGraph(const LayoutConstraintGraph &graph,
         }))
       return emitError(loc) << "solution for " << var.stableName
                             << " is outside its candidate domain";
-    if (failed(target.verifyCandidate(var, found->second, loc)))
+    if (failed(target.verifyCandidate(var, found->second,
+                                      getVariableLoc(var))))
+      return failure();
+    if (failed(verifyStorageCapacity(var, found->second)))
       return failure();
   }
   for (const LayoutConstraint &constraint : graph.getConstraints()) {

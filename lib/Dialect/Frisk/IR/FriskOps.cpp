@@ -1303,11 +1303,11 @@ LogicalResult GemmOp::inferLayout(OpBuilder &builder,
 
   auto parseMemorySpace = [&](MemRefType type,
                               StringRef label) -> std::optional<attr::MemorySpace> {
-    unsigned memSpace = type.getMemorySpaceAsInt();
-    if (auto symbolic = attr::symbolizeMemorySpace(memSpace))
-      return *symbolic;
+    if (std::optional<attr::MemorySpace> memorySpace =
+            getFriskMemorySpace(type))
+      return memorySpace;
     emitOpError() << "operand " << label
-                  << " resides in unsupported memory space " << memSpace;
+                  << " resides in an unsupported memory space";
     return std::nullopt;
   };
 
@@ -1453,8 +1453,9 @@ LogicalResult AllocBufferOp::verify() {
     return emitOpError("elementType attribute must match result memref element type");
   }
 
-  unsigned resultMemorySpace = memrefType.getMemorySpaceAsInt();
-  if (resultMemorySpace != static_cast<unsigned>(attrMemorySpace)) {
+  std::optional<attr::MemorySpace> resultMemorySpace =
+      getFriskMemorySpace(memrefType);
+  if (!resultMemorySpace || *resultMemorySpace != attrMemorySpace) {
     return emitOpError("memorySpace attribute must match result memref memory space");
   }
   // 检查对齐值是否有效

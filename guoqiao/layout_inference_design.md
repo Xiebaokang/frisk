@@ -68,7 +68,9 @@ Frisk 应采用已经确认的 MLIR-native 双域 IR 架构，并进行以下重
 - `frisk.layout_view` 已提供 Shared/Global Storage binding；module 级 `frisk-infer-layouts` 已依次执行约束收集、strict/common 传播、受限求解、物化和二次验证。
 - constraint graph 使用函数/block/op/result 组成的稳定名称；hard conflict 可输出两条 seed provenance。
 - M2 bootstrap resolver 只处理每连通分量最多 8 个变量、每个 domain 最多 4 个候选，不枚举 conversion/rematerialization；二维 Storage domain 为 linear、transpose、padding 和按行字节选择的一个 32B/64B/128B XOR 候选。
-- `gemm/copy/fill/reduce` 的 MemoryEffect 已修正；M2 collector 目前只接收静态 whole-tile Copy，其他 Copy 明确诊断 unsupported。
+- materialized verifier 会枚举静态 logical domain，验证每个元素的 bit range 不重叠，并证明最大地址不超过底层 MemRef strided/affine type 表达的静态容量；无法证明时保守拒绝。
+- `gemm/copy/fill/reduce` 的 MemoryEffect 已修正；M2 collector 目前只接收两个 operand 都由 `layout_view` 锚定的静态 whole-tile Copy，其他 Copy 明确诊断 unsupported。
+- M2 alias group 覆盖任意深度、零变换的 `layout_view` chain；`memref.cast`、`subview` 等 transform-aware alias 归入 M4 的统一 AliasAnalysis/region 传播。
 - Parallel 内的递归推断只覆盖部分操作，没有形成统一的 Op Interface 调度。
 - Storage binding 已进入 Frisk IR，但推断结果还没有完整进入 Frisk → NVGPU/NVVM 的 conversion pipeline，因此当前布局正确并不等于最终代码质量正确。
 
@@ -187,7 +189,7 @@ Shared/Global 仍是 MemRef，但不能把所有 shared XOR layout 直接塞进 
   : memref<64x64xbf16, #frisk.shared>
 ```
 
-`frisk.layout_view` 必须实现 `ViewLikeOpInterface`，不分配新内存；它为同一底层 MemRef 的不同逻辑 tile/view 提供唯一 SSA layout anchor。AliasAnalysis 和 view-chain 用于确保所有 alias 的 storage layout 一致。
+`frisk.layout_view` 必须实现 `ViewLikeOpInterface`，不分配新内存；它为同一底层 MemRef 的不同逻辑 tile/view 提供唯一 SSA layout anchor。M2 沿零变换的 `layout_view` chain 合并 alias；M4 再由 AliasAnalysis 覆盖 `memref.cast`、`subview` 等带变换的 view，确保所有 alias 的 storage layout 一致。
 
 Global MemRef 的默认物理布局直接复用 strided/affine layout；只有 tile permutation、packed/sub-byte 或特殊访问需要 `StorageLayoutAttr`。
 

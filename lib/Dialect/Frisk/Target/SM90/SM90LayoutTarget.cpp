@@ -21,8 +21,7 @@ ArrayAttr getDimensionNames(Builder &builder, unsigned rank) {
 }
 
 std::optional<attr::MemorySpace> getMemorySpace(MemRefType type) {
-  std::optional<attr::MemorySpace> space =
-      attr::symbolizeMemorySpace(type.getMemorySpaceAsInt());
+  std::optional<attr::MemorySpace> space = getFriskMemorySpace(type);
   if (!space || *space == attr::MemorySpace::Local)
     return std::nullopt;
   return space;
@@ -163,11 +162,12 @@ public:
       const LayoutVar &var,
       SmallVectorImpl<LayoutCandidate> &out) const override {
     auto type = dyn_cast<MemRefType>(var.shapedType);
-    if (var.kind != LayoutKind::Storage || !type || !type.hasStaticShape())
+    if (var.kind != LayoutKind::Storage || !type || !type.hasStaticShape() ||
+        !type.getElementType().isIntOrFloat())
       return;
     auto append = [&](Attribute candidate, uint64_t ordinal) {
       if (candidate)
-        out.push_back({candidate, 0, ordinal});
+        out.push_back({candidate, kInvalidProvenanceID, ordinal});
     };
     append(buildLinear(type), 0);
     append(buildTranspose(type), 1);

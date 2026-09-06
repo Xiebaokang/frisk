@@ -1,13 +1,11 @@
 #include "Dialect/Frisk/Analysis/LayoutSolver.h"
 
-#include <algorithm>
+#include <functional>
 
 #include "Dialect/Frisk/IR/FriskDialect.h"
 #include "Dialect/Frisk/IR/FriskOps.h"
 
-#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Support/Format.h"
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
@@ -117,16 +115,81 @@ bool isWholeTileStaticCopy(CopyOp copy) {
          srcType.getElementType() == dstType.getElementType() &&
          copy.getSrcIndices().empty() && copy.getDstIndices().empty() &&
          copy.getSrcMap().getNumInputs() == 0 &&
-         copy.getDstMap().getNumInputs() == 0;
+         copy.getDstMap().getNumInputs() == 0 &&
+         copy.getSrcMap().getNumResults() == 0 &&
+         copy.getDstMap().getNumResults() == 0;
+}
+
+Value getLayoutViewAliasRoot(Value value) {
+  while (auto view = value.getDefiningOp<LayoutViewOp>())
+    value = view.getSource();
+  return value;
+}
+
+FailureOr<Attribute> projectCandidate(ConstraintKind kind,
+                                      Attribute candidate,
+                                      const LayoutVar &targetVar) {
+  if (kind == ConstraintKind::SameLayout ||
+      kind == ConstraintKind::AliasLayout)
+    return candidate;
+  if (kind != ConstraintKind::StorageAccess)
+    return failure();
+  auto sourceStorage = dyn_cast<StorageLayoutAttr>(candidate);
+  auto targetType = dyn_cast<MemRefType>(targetVar.shapedType);
+  if (!sourceStorage || !targetType)
+    return failure();
+  std::optional<attr::MemorySpace> targetSpace =
+      getFriskMemorySpace(targetType);
+  if (!targetSpace || *targetSpace == attr::MemorySpace::Local)
+    return failure();
+  return Attribute(StorageLayoutAttr::get(
+      targetType.getContext(), sourceStorage.getMap(),
+      MemorySpaceAttr::get(targetType.getContext(), *targetSpace),
+      sourceStorage.getAlignment(), sourceStorage.getVectorGranularity()));
 }
 
 } // namespace
 
-static StringRef findEnclosingSymbol(Operation *operation) {
-  for (Operation *owner = operation; owner; owner = owner->getParentOp())
-    if (auto name = owner->getAttrOfType<StringAttr>(
-            SymbolTable::getSymbolAttrName()))
-      return name.getValue();
+static Operation *findEnclosingSymbol(Operation *operation) {
+  Operation *top = operation;
+  for (Operation *owner = operation; owner; owner = owner->getParentOp()) {
+    top = owner;
+    if (owner->hasAttr(SymbolTable::getSymbolAttrName()))
+      return owner;
+  }
+  return top;
+}
+
+static unsigned getBlockOrdinal(Operation *scope, Block *target) {
+  if (!scope)
+    return 0;
+  unsigned ordinal = 0;
+  bool found = false;
+  std::function<void(Operation *)> visit = [&](Operation *operation) {
+    for (Region &region : operation->getRegions()) {
+      for (Block &block : region) {
+        if (found)
+          return;
+        if (&block == target) {
+          found = true;
+          return;
+        }
+        ++ordinal;
+        for (Operation &nested : block)
+          visit(&nested);
+      }
+    }
+  };
+  visit(scope);
+  return ordinal;
+}
+
+static StringRef getSymbolName(Operation *symbol) {
+  if (!symbol)
+    return "anonymous";
+  if (auto name = symbol->getAttrOfType<StringAttr>(
+          SymbolTable::getSymbolAttrName()))
+    return name.getValue();
   return "anonymous";
 }
 
@@ -139,28 +202,24 @@ static std::string getStableValueName(Value value, LayoutKind kind,
   if (auto result = dyn_cast<OpResult>(value)) {
     Operation *operation = result.getOwner();
     Block *block = operation->getBlock();
-    unsigned blockOrdinal = 0;
-    if (Region *region = block->getParent()) {
-      for (Block &candidate : *region) {
-        if (&candidate == block)
-          break;
-        ++blockOrdinal;
-      }
-    }
+    Operation *symbol = findEnclosingSymbol(operation);
+    unsigned blockOrdinal = getBlockOrdinal(symbol, block);
     unsigned operationOrdinal = 0;
     for (Operation &candidate : *block) {
       if (&candidate == operation)
         break;
       ++operationOrdinal;
     }
-    stream << findEnclosingSymbol(operation) << "/b" << blockOrdinal << "/o"
+    stream << getSymbolName(symbol) << "/b" << blockOrdinal << "/o"
            << operationOrdinal << "/r" << result.getResultNumber() << "/"
            << kindName;
     return name;
   }
   if (auto argument = dyn_cast<BlockArgument>(value)) {
     Operation *owner = argument.getOwner()->getParentOp();
-    stream << findEnclosingSymbol(owner) << "/b0/arg"
+    Operation *symbol = findEnclosingSymbol(owner);
+    stream << getSymbolName(symbol) << "/b"
+           << getBlockOrdinal(symbol, argument.getOwner()) << "/arg"
            << argument.getArgNumber() << "/" << kindName;
     return name;
   }
@@ -170,6 +229,9 @@ static std::string getStableValueName(Value value, LayoutKind kind,
 
 LayoutVarID LayoutConstraintBuilder::getOrCreate(Value value,
                                                  LayoutKind kind) {
+  DenseMap<Value, LayoutVarID> &variablesByValue =
+      kind == LayoutKind::Storage ? storageVariablesByValue
+                                  : distributedVariablesByValue;
   auto found = variablesByValue.find(value);
   if (found != variablesByValue.end())
     return found->second;
@@ -216,7 +278,10 @@ LogicalResult LayoutConstraintBuilder::same(LayoutVarID lhs,
 }
 
 std::optional<LayoutVarID>
-LayoutConstraintBuilder::lookup(Value value) const {
+LayoutConstraintBuilder::lookup(Value value, LayoutKind kind) const {
+  const DenseMap<Value, LayoutVarID> &variablesByValue =
+      kind == LayoutKind::Storage ? storageVariablesByValue
+                                  : distributedVariablesByValue;
   auto found = variablesByValue.find(value);
   if (found == variablesByValue.end())
     return std::nullopt;
@@ -228,17 +293,35 @@ collectLayoutConstraints(Operation *root, LayoutTarget &target) {
   LayoutConstraintGraph graph;
   LayoutConstraintBuilder builder(graph);
   DenseMap<Value, SmallVector<LayoutVarID>> viewsBySource;
+  SmallVector<Value> sourceOrder;
   bool failedCollection = false;
 
   root->walk([&](LayoutViewOp view) {
     LayoutVarID id = builder.getOrCreateStorageVar(view.getResult());
-    viewsBySource[view.getSource()].push_back(id);
+    Value aliasRoot = getLayoutViewAliasRoot(view.getSource());
+    auto [sourceIt, inserted] = viewsBySource.try_emplace(aliasRoot);
+    if (inserted)
+      sourceOrder.push_back(aliasRoot);
+    sourceIt->second.push_back(id);
     if (StorageLayoutAttr layout = view.getLayoutAttr())
       failedCollection |= failed(builder.require(id, layout, view, "layout_view"));
   });
 
-  for (auto &entry : viewsBySource) {
-    ArrayRef<LayoutVarID> ids = entry.second;
+  for (Value source : sourceOrder) {
+    ArrayRef<LayoutVarID> ids = viewsBySource.find(source)->second;
+    SmallVector<LayoutCandidate> explicitSeeds;
+    for (LayoutVarID id : ids)
+      llvm::append_range(explicitSeeds, graph.getVariable(id).candidates);
+    for (LayoutVarID id : ids) {
+      LayoutVar &var = graph.getVariable(id);
+      for (const LayoutCandidate &seed : explicitSeeds)
+        if (llvm::none_of(var.candidates,
+                          [&](const LayoutCandidate &candidate) {
+              return candidate.value == seed.value;
+            }))
+          var.candidates.push_back(seed);
+      updateState(var);
+    }
     for (size_t index = 1; index < ids.size(); ++index)
       graph.addConstraint(ConstraintKind::AliasLayout,
                           ConstraintStrength::Hard,
@@ -253,6 +336,14 @@ collectLayoutConstraints(Operation *root, LayoutTarget &target) {
       copy.emitOpError(
           "unsupported storage layout inference for non-whole-tile or "
           "dynamic copy");
+      failedCollection = true;
+      return;
+    }
+    if (!copy.getSrc().getDefiningOp<LayoutViewOp>() ||
+        !copy.getDst().getDefiningOp<LayoutViewOp>()) {
+      copy.emitOpError(
+          "M2 storage layout inference requires whole-tile copy operands "
+          "to be layout_view results");
       failedCollection = true;
       return;
     }
@@ -271,19 +362,79 @@ collectLayoutConstraints(Operation *root, LayoutTarget &target) {
   if (failed(graph.finalize(root->getLoc())))
     return failure();
 
-  for (LayoutVar &var : graph.getVariables()) {
-    if (var.candidates.empty()) {
-      SmallVector<LayoutCandidate> candidates;
-      target.enumerateCandidates(var, candidates);
-      for (const LayoutCandidate &candidate : candidates) {
-        if (succeeded(target.verifyCandidate(var, candidate.value,
-                                             root->getLoc())) &&
-            llvm::none_of(var.candidates, [&](const LayoutCandidate &known) {
-              return known.value == candidate.value;
-            }))
-          var.candidates.push_back(candidate);
+  auto projectCandidatesToFixedPoint = [&]() {
+    bool addedCandidate;
+    do {
+      addedCandidate = false;
+      for (const LayoutConstraint &constraint : graph.getConstraints()) {
+        if (constraint.strength != ConstraintStrength::Hard ||
+            !isEqualityConstraint(constraint.kind))
+          continue;
+        for (LayoutVarID sourceID : constraint.vars) {
+          SmallVector<LayoutCandidate> sourceCandidates(
+              graph.getVariable(sourceID).candidates);
+          for (LayoutVarID targetID : constraint.vars) {
+            if (sourceID == targetID)
+              continue;
+            LayoutVar &targetVar = graph.getVariable(targetID);
+            for (const LayoutCandidate &sourceCandidate : sourceCandidates) {
+              FailureOr<Attribute> projected = projectCandidate(
+                  constraint.kind, sourceCandidate.value, targetVar);
+              if (failed(projected) ||
+                  llvm::any_of(targetVar.candidates,
+                               [&](const LayoutCandidate &known) {
+                    return known.value == *projected;
+                  }) ||
+                  failed(target.verifyCandidate(targetVar, *projected,
+                                                root->getLoc())))
+                continue;
+              std::optional<ProvenanceID> parent;
+              if (sourceCandidate.provenance != kInvalidProvenanceID &&
+                  sourceCandidate.provenance < graph.getProvenances().size())
+                parent = sourceCandidate.provenance;
+              Operation *source =
+                  graph.getProvenances()[constraint.provenance].source;
+              ProvenanceID provenance = graph.addProvenance(
+                  parent, source, "constraint-projection",
+                  ("candidate projected through " +
+                   stringifyConstraintKind(constraint.kind))
+                      .str());
+              targetVar.candidates.push_back(
+                  {*projected, provenance, sourceCandidate.stableOrdinal});
+              addedCandidate = true;
+            }
+          }
+        }
       }
+    } while (addedCandidate);
+  };
+
+  // Let hard seeds initialize connected domains before asking the target for
+  // an unconstrained domain. This keeps an arbitrary valid explicit binding
+  // from spuriously overflowing the bootstrap domain limit.
+  projectCandidatesToFixedPoint();
+  for (LayoutVar &var : graph.getVariables()) {
+    if (!var.candidates.empty())
+      continue;
+    SmallVector<LayoutCandidate> candidates;
+    target.enumerateCandidates(var, candidates);
+    for (const LayoutCandidate &candidate : candidates) {
+      if (failed(target.verifyCandidate(var, candidate.value,
+                                        root->getLoc())) ||
+          llvm::any_of(var.candidates, [&](const LayoutCandidate &known) {
+            return known.value == candidate.value;
+          }))
+        continue;
+      LayoutCandidate recorded = candidate;
+      recorded.provenance = graph.addProvenance(
+          std::nullopt, var.anchor ? var.anchor : root, "target-candidate",
+          "layout enumerated by the target model");
+      var.candidates.push_back(recorded);
     }
+  }
+  projectCandidatesToFixedPoint();
+
+  for (LayoutVar &var : graph.getVariables()) {
     llvm::stable_sort(var.candidates,
                       [](const LayoutCandidate &lhs,
                          const LayoutCandidate &rhs) {
@@ -301,32 +452,35 @@ collectLayoutConstraints(Operation *root, LayoutTarget &target) {
 }
 
 LogicalResult propagateStrict(LayoutConstraintGraph &graph) {
-  for (const LayoutConstraint &constraint : graph.getConstraints()) {
-    if (constraint.strength != ConstraintStrength::Hard)
-      continue;
-    if (constraint.kind == ConstraintKind::RequireEncoding) {
-      LayoutVar &var = graph.getVariable(constraint.vars.front());
-      size_t oldSize = var.candidates.size();
-      llvm::erase_if(var.candidates, [&](const LayoutCandidate &candidate) {
-        return candidate.value != constraint.requiredEncoding;
+  bool changed;
+  do {
+    changed = false;
+    for (const LayoutConstraint &constraint : graph.getConstraints()) {
+      if (constraint.strength != ConstraintStrength::Hard)
+        continue;
+      if (constraint.kind == ConstraintKind::RequireEncoding) {
+        LayoutVar &var = graph.getVariable(constraint.vars.front());
+        size_t oldSize = var.candidates.size();
+        llvm::erase_if(var.candidates, [&](const LayoutCandidate &candidate) {
+          return candidate.value != constraint.requiredEncoding;
+        });
+        changed |= oldSize != var.candidates.size();
+        updateState(var);
+        if (var.state == LayoutState::Conflict)
+          return emitConflict(graph, constraint);
+        continue;
+      }
+      if (!isEqualityConstraint(constraint.kind))
+        continue;
+      bool anySingleton = llvm::any_of(constraint.vars, [&](LayoutVarID id) {
+        return graph.getVariable(id).candidates.size() == 1;
       });
-      (void)oldSize;
-      updateState(var);
-      if (var.state == LayoutState::Conflict)
-        return emitConflict(graph, constraint);
-      continue;
+      if (!anySingleton)
+        continue;
+      if (failed(applyEqualityConstraint(graph, constraint, changed)))
+        return failure();
     }
-    if (!isEqualityConstraint(constraint.kind))
-      continue;
-    bool anySingleton = llvm::any_of(constraint.vars, [&](LayoutVarID id) {
-      return graph.getVariable(id).candidates.size() == 1;
-    });
-    if (!anySingleton)
-      continue;
-    bool changed = false;
-    if (failed(applyEqualityConstraint(graph, constraint, changed)))
-      return failure();
-  }
+  } while (changed);
   return success();
 }
 

@@ -1,6 +1,8 @@
 #ifndef FRISK_ATTRIBUTES_H
 #define FRISK_ATTRIBUTES_H
 
+#include <cstdint>
+#include <optional>
 #include <string>
 
 #include "llvm/Support/raw_ostream.h"
@@ -30,6 +32,11 @@ std::string layoutDebugString(LayoutAttr layout);
 
 LayoutProof checkInjective(BitLinearLayoutMapAttr map);
 LayoutProof checkSurjective(BitLinearLayoutMapAttr map);
+
+std::optional<attr::MemorySpace> getFriskMemorySpace(MemRefType type);
+FailureOr<uint64_t> getMemRefStaticCapacityBytes(MemRefType type);
+FailureOr<uint64_t> getStorageFootprintBytes(StorageLayoutAttr layout,
+                                             MemRefType type);
 
 FailureOr<BitLinearLayoutMapAttr>
 composeBitLinear(BitLinearLayoutMapAttr lhs, BitLinearLayoutMapAttr rhs);

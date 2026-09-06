@@ -15,6 +15,14 @@ module {
       : memref<4xf16, 3> -> memref<4xf16, 3>
     return
   }
+
+  func.func @typed_memory_space(
+      %source: memref<4xf16, #frisk<memory_space Shared>>) {
+    %view = frisk.layout_view %source {layout = #linear}
+      : memref<4xf16, #frisk<memory_space Shared>>
+        -> memref<4xf16, #frisk<memory_space Shared>>
+    return
+  }
 }
 
 // CHECK: %{{.*}} = frisk.layout_view %{{.*}} {layout = #frisk.storage<{{.*}}>}
@@ -26,6 +34,24 @@ module {
     // expected-error@+1 {{source and result must have identical memref types}}
     %view = frisk.layout_view %source
       : memref<4xf16, 3> -> memref<2x2xf16, 3>
+    return
+  }
+}
+
+// -----
+
+#overlapping_elements = #frisk.storage<
+  map = #frisk.affine_layout<inputs = ["dim0"], input_extents = [4],
+    outputs = ["byte_offset", "bit_offset"], output_extents = [4, 8],
+    map = affine_map<(d0) -> (d0, 0)>>,
+  memory_space = #frisk<memory_space Shared>, alignment = 1,
+  vector_granularity = 1>
+
+module {
+  func.func @overlapping_element_ranges(%source: memref<4xf16, 3>) {
+    // expected-error@+1 {{storage element bit ranges must be provably non-overlapping}}
+    %view = frisk.layout_view %source {layout = #overlapping_elements}
+      : memref<4xf16, 3> -> memref<4xf16, 3>
     return
   }
 }

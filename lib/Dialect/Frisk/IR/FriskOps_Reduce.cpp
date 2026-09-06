@@ -241,11 +241,11 @@ LogicalResult ReduceOp::inferLayout(OpBuilder &builder,
 
   auto parseMemorySpace = [&](MemRefType type,
                               StringRef label) -> std::optional<attr::MemorySpace> {
-    unsigned raw = type.getMemorySpaceAsInt();
-    if (auto symbolic = attr::symbolizeMemorySpace(raw))
-      return *symbolic;
+    if (std::optional<attr::MemorySpace> memorySpace =
+            getFriskMemorySpace(type))
+      return memorySpace;
     emitOpError() << "operand " << label
-                  << " resides in unsupported memory space " << raw;
+                  << " resides in an unsupported memory space";
     return std::nullopt;
   };
 

@@ -22,13 +22,15 @@ public:
   LogicalResult same(LayoutVarID lhs, LayoutVarID rhs, Operation *source,
                      StringRef rule);
 
-  std::optional<LayoutVarID> lookup(Value value) const;
+  std::optional<LayoutVarID>
+  lookup(Value value, LayoutKind kind = LayoutKind::Storage) const;
 
 private:
   LayoutVarID getOrCreate(Value value, LayoutKind kind);
 
   LayoutConstraintGraph &graph;
-  DenseMap<Value, LayoutVarID> variablesByValue;
+  DenseMap<Value, LayoutVarID> storageVariablesByValue;
+  DenseMap<Value, LayoutVarID> distributedVariablesByValue;
   uint64_t nextStableOrdinal = 0;
 };
 

@@ -45,8 +45,9 @@ protected:
 
 TEST_F(LayoutVerifierTest, BootstrapSolverUsesStableCandidateOrdinal) {
   LayoutConstraintGraph graph;
-  LayoutVarID id = graph.addVariable(LayoutKind::Storage, type, "only");
-  graph.getVariable(id).candidates = {{a, 0, 9}, {b, 0, 1}};
+  LayoutVarID id = graph.addVariable(LayoutKind::Distributed, type, "only");
+  graph.getVariable(id).candidates = {
+      {a, kInvalidProvenanceID, 9}, {b, kInvalidProvenanceID, 1}};
   graph.getVariable(id).state = LayoutState::CandidateSet;
   ASSERT_TRUE(succeeded(graph.finalize(loc)));
 
@@ -61,7 +62,7 @@ TEST_F(LayoutVerifierTest, BootstrapSolverUsesStableCandidateOrdinal) {
 TEST_F(LayoutVerifierTest, RejectsIncompleteSolutionAndDomainLimit) {
   LayoutConstraintGraph graph;
   LayoutVarID id = graph.addVariable(LayoutKind::Storage, type, "only");
-  graph.getVariable(id).candidates = {{a, 0, 0}};
+  graph.getVariable(id).candidates = {{a, kInvalidProvenanceID, 0}};
   graph.getVariable(id).state = LayoutState::Resolved;
   ASSERT_TRUE(succeeded(graph.finalize(loc)));
   LayoutSolution incomplete;
@@ -72,10 +73,24 @@ TEST_F(LayoutVerifierTest, RejectsIncompleteSolutionAndDomainLimit) {
   id = tooLarge.addVariable(LayoutKind::Storage, type, "large-domain");
   for (unsigned ordinal = 0; ordinal < 5; ++ordinal)
     tooLarge.getVariable(id).candidates.push_back(
-        {builder.getStringAttr("candidate" + Twine(ordinal)), 0, ordinal});
+        {builder.getStringAttr("candidate" + Twine(ordinal)),
+         kInvalidProvenanceID, ordinal});
   tooLarge.getVariable(id).state = LayoutState::CandidateSet;
   ASSERT_TRUE(succeeded(tooLarge.finalize(loc)));
   EXPECT_TRUE(failed(solveBootstrapLayoutGraph(tooLarge, target)));
+}
+
+TEST_F(LayoutVerifierTest, RejectsUnsupportedHardConstraint) {
+  LayoutConstraintGraph graph;
+  LayoutVarID id = graph.addVariable(LayoutKind::Storage, type, "only");
+  graph.getVariable(id).candidates = {{a, kInvalidProvenanceID, 0}};
+  graph.getVariable(id).state = LayoutState::Resolved;
+  graph.addConstraint(ConstraintKind::ResourceLimit,
+                      ConstraintStrength::Hard, {id}, nullptr, "capacity",
+                      "unsupported bootstrap resource limit");
+  ASSERT_TRUE(succeeded(graph.finalize(loc)));
+
+  EXPECT_TRUE(failed(solveBootstrapLayoutGraph(graph, target)));
 }
 
 } // namespace

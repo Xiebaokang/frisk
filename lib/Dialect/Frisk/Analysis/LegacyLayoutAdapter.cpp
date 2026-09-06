@@ -519,8 +519,7 @@ convertLegacyStorage(LayoutAttr legacy, MemRefType type, Location loc) {
                       "layout algebra";
     return failure();
   };
-  std::optional<attr::MemorySpace> memorySpace =
-      attr::symbolizeMemorySpace(type.getMemorySpaceAsInt());
+  std::optional<attr::MemorySpace> memorySpace = getFriskMemorySpace(type);
   if (!memorySpace || *memorySpace == attr::MemorySpace::Local)
     return reject();
   FailureOr<LegacyStorageInfo> info = analyzeLegacyStorage(legacy, type);

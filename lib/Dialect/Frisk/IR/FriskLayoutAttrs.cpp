@@ -1213,13 +1213,90 @@ FailureOr<Attribute> StorageLayoutAttr::getCanonicalMap(ShapedType) const {
   return map.canonicalizeMap();
 }
 
+std::optional<attr::MemorySpace> getFriskMemorySpace(MemRefType type) {
+  Attribute memorySpace = type.getMemorySpace();
+  if (!memorySpace)
+    return attr::MemorySpace::Local;
+  if (auto friskSpace = dyn_cast<MemorySpaceAttr>(memorySpace))
+    return friskSpace.getValue();
+  auto integerSpace = dyn_cast<IntegerAttr>(memorySpace);
+  if (!integerSpace)
+    return std::nullopt;
+  return attr::symbolizeMemorySpace(integerSpace.getInt());
+}
+
+FailureOr<uint64_t> getMemRefStaticCapacityBytes(MemRefType type) {
+  if (!type.hasStaticShape() || !type.getElementType().isIntOrFloat())
+    return failure();
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  if (failed(type.getStridesAndOffset(strides, offset)) || offset < 0 ||
+      llvm::is_contained(strides, ShapedType::kDynamic))
+    return failure();
+  uint64_t maximumElement = static_cast<uint64_t>(offset);
+  for (auto [extent, stride] : llvm::zip_equal(type.getShape(), strides)) {
+    if (extent <= 0 || stride < 0)
+      return failure();
+    uint64_t lastIndex = static_cast<uint64_t>(extent - 1);
+    if (stride != 0 &&
+        lastIndex > std::numeric_limits<uint64_t>::max() /
+                        static_cast<uint64_t>(stride))
+      return failure();
+    uint64_t contribution = lastIndex * static_cast<uint64_t>(stride);
+    if (maximumElement >
+        std::numeric_limits<uint64_t>::max() - contribution)
+      return failure();
+    maximumElement += contribution;
+  }
+  uint64_t elementBits = type.getElementTypeBitWidth();
+  if (maximumElement == std::numeric_limits<uint64_t>::max() ||
+      maximumElement + 1 >
+          std::numeric_limits<uint64_t>::max() / elementBits)
+    return failure();
+  return llvm::divideCeil((maximumElement + 1) * elementBits, uint64_t{8});
+}
+
+FailureOr<uint64_t> getStorageFootprintBytes(StorageLayoutAttr layout,
+                                             MemRefType type) {
+  if (!type.hasStaticShape() || !type.getElementType().isIntOrFloat())
+    return failure();
+  uint64_t elementBits = type.getElementTypeBitWidth();
+  SmallVector<std::pair<uint64_t, uint64_t>> intervals;
+  if (failed(enumeratePoints(type.getShape(), [&](ArrayRef<int64_t> point) {
+        FailureOr<SmallVector<int64_t>> output =
+            evaluateLayout(layout.getMap(), point);
+        if (failed(output) || output->size() != 2 || (*output)[0] < 0 ||
+            (*output)[1] < 0 || (*output)[1] >= 8)
+          return failure();
+        uint64_t byteOffset = static_cast<uint64_t>((*output)[0]);
+        uint64_t bitOffset = static_cast<uint64_t>((*output)[1]);
+        if (byteOffset >
+            (std::numeric_limits<uint64_t>::max() - bitOffset) / 8)
+          return failure();
+        uint64_t begin = byteOffset * 8 + bitOffset;
+        if (begin > std::numeric_limits<uint64_t>::max() - elementBits)
+          return failure();
+        intervals.emplace_back(begin, begin + elementBits);
+        return success();
+      })))
+    return failure();
+
+  llvm::sort(intervals);
+  uint64_t maximumEnd = 0;
+  for (auto [begin, end] : intervals) {
+    if (begin < maximumEnd)
+      return failure();
+    maximumEnd = end;
+  }
+  return llvm::divideCeil(maximumEnd, uint64_t{8});
+}
+
 LogicalResult StorageLayoutAttr::verifyForType(ShapedType type,
                                                 Location loc) const {
   auto memref = dyn_cast<MemRefType>(type);
   if (!memref)
     return emitError(loc) << "storage encoding requires a MemRefType";
-  std::optional<attr::MemorySpace> typeSpace =
-      attr::symbolizeMemorySpace(memref.getMemorySpaceAsInt());
+  std::optional<attr::MemorySpace> typeSpace = getFriskMemorySpace(memref);
   if (!typeSpace || *typeSpace != getMemorySpace().getValue())
     return emitError(loc)
            << "storage encoding memory space must match the MemRefType";
@@ -1248,6 +1325,10 @@ LogicalResult StorageLayoutAttr::verifyForType(ShapedType type,
     return emitError(loc)
            << "storage map produced a negative byte offset or bit offset "
               "outside [0, 8)";
+  if (memref.getElementType().isIntOrFloat() &&
+      failed(getStorageFootprintBytes(*this, memref)))
+    return emitError(loc)
+           << "storage element bit ranges must be provably non-overlapping";
   return success();
 }
 

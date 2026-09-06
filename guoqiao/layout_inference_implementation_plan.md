@@ -1542,7 +1542,7 @@ M2 不枚举 conversion/rematerialization；Task 15 扩展该 resolver 处理一
 
 - [X] **Step 3: 实现 solved graph verifier**
 
-逐 assignment 检查 kind、type、coverage/injectivity、alias 和 Copy relation。失败信息包含稳定 var 名、candidate、constraint rule 和 provenance chain。
+逐 assignment 检查 kind、type、coverage/injectivity、alias 和 Copy relation；物化后二次验证还会枚举静态 logical domain，证明元素 bit range 不重叠且 storage footprint 不超过底层 MemRef strided/affine type 的静态容量。失败信息包含稳定 var 名、candidate、constraint rule 和 provenance chain。
 
 - [X] **Step 4: 实现 Storage materialization**
 

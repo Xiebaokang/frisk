@@ -25,7 +25,8 @@ protected:
                  std::initializer_list<Attribute> attrs) {
     uint64_t ordinal = 0;
     for (Attribute attr : attrs)
-      graph.getVariable(id).candidates.push_back({attr, 0, ordinal++});
+      graph.getVariable(id).candidates.push_back(
+          {attr, kInvalidProvenanceID, ordinal++});
     graph.getVariable(id).state = LayoutState::CandidateSet;
   }
 
@@ -57,6 +58,32 @@ TEST_F(LayoutPropagationTest, StrictSeedPropagatesAcrossStorageAccess) {
   ASSERT_EQ(graph.getVariable(dstID).candidates.size(), 1u);
   EXPECT_EQ(graph.getVariable(dstID).candidates.front().value, a);
   EXPECT_EQ(graph.getVariable(dstID).state, LayoutState::Resolved);
+}
+
+TEST_F(LayoutPropagationTest, StrictPropagationReachesFixedPoint) {
+  LayoutConstraintGraph graph;
+  LayoutVarID first = graph.addVariable(LayoutKind::Storage, type, "first");
+  LayoutVarID middle =
+      graph.addVariable(LayoutKind::Storage, type, "middle");
+  LayoutVarID last = graph.addVariable(LayoutKind::Storage, type, "last");
+  addDomain(graph, first, {a, b});
+  addDomain(graph, middle, {a, b});
+  addDomain(graph, last, {a, b});
+  graph.addConstraint(ConstraintKind::SameLayout, ConstraintStrength::Hard,
+                      {first, middle}, nullptr, "first-middle", "chain");
+  graph.addConstraint(ConstraintKind::SameLayout, ConstraintStrength::Hard,
+                      {middle, last}, nullptr, "middle-last", "chain");
+  graph.addConstraint(ConstraintKind::RequireEncoding,
+                      ConstraintStrength::Hard, {last}, nullptr, "seed",
+                      "late ordered seed", a);
+  ASSERT_TRUE(succeeded(graph.finalize(loc)));
+
+  ASSERT_TRUE(succeeded(propagateStrict(graph)));
+  for (const LayoutVar &var : graph.getVariables()) {
+    ASSERT_EQ(var.candidates.size(), 1u);
+    EXPECT_EQ(var.candidates.front().value, a);
+    EXPECT_EQ(var.state, LayoutState::Resolved);
+  }
 }
 
 TEST_F(LayoutPropagationTest, CommonPropagationComputesFixedPointIntersection) {
