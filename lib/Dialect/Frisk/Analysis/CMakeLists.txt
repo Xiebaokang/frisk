@@ -16,3 +16,12 @@ add_frisk_library(FriskLegacyLayoutAdapter
   FriskIR
   MLIRIR
 )
+
+add_frisk_library(FriskLayoutAnalysis
+  LayoutPropagation.cpp
+
+  LINK_LIBS PUBLIC
+  FriskAnalysis
+  FriskIR
+  MLIRIR
+)

@@ -7,5 +7,7 @@ add_frisk_library(FriskTransforms
     MLIRFuncDialect
     MLIRIR
     MLIRPass
+    FriskLayoutAnalysis
     FriskIR
+    FriskSM90LayoutTarget
 )

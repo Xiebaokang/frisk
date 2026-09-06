@@ -4,6 +4,7 @@ add_unittest(FriskUnitTests FriskLayoutUnitTests
   LayoutEncodingTest.cpp
   LayoutInterfaceTest.cpp
   LayoutConstraintTest.cpp
+  LayoutPropagationTest.cpp
   LegacyLayoutAdapterTest.cpp
   ProductLayoutTest.cpp
 )
@@ -16,6 +17,8 @@ target_link_libraries(FriskLayoutUnitTests
   PRIVATE
   FriskAnalysis
   FriskIR
+  FriskLayoutAnalysis
+  FriskSM90LayoutTarget
   FriskLegacyLayoutAdapter
   MLIRFuncDialect
   MLIRIR

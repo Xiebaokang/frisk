@@ -6,4 +6,5 @@ module {
   }
 }
 
-// CHECK: frisk.layout_inference_ran
+// CHECK: func.func @smoke
+// CHECK-NOT: frisk.layout_inference_ran
