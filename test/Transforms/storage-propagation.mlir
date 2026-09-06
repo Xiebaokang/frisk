@@ -7,7 +7,7 @@
   memory_space = #frisk<memory_space Global>, alignment = 2,
   vector_granularity = 2>
 
-module {
+module attributes {frisk.target = "sm_90"} {
   func.func @whole_tile_copy(%src: memref<4xf16, 1>,
                              %dst: memref<4xf16, 3>) {
     %src_view = frisk.layout_view %src {layout = #global_linear}
@@ -19,6 +19,15 @@ module {
       srcExtents = array<i64: 4>, dstExtents = array<i64: 4>
     }> {operandSegmentSizes = array<i32: 1, 1, 0, 0>}
       : (memref<4xf16, 1>, memref<4xf16, 3>) -> ()
+    return
+  }
+}
+
+// -----
+
+// expected-error@+1 {{frisk-infer-layouts supports only NVIDIA SM90/SM90a targets}}
+module attributes {frisk.target = "gfx90a"} {
+  func.func @unsupported_target() {
     return
   }
 }

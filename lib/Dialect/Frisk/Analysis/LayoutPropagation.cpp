@@ -184,13 +184,18 @@ static unsigned getBlockOrdinal(Operation *scope, Block *target) {
   return ordinal;
 }
 
-static StringRef getSymbolName(Operation *symbol) {
-  if (!symbol)
+static std::string getQualifiedSymbolName(Operation *operation) {
+  SmallVector<StringRef> components;
+  for (Operation *owner = operation; owner; owner = owner->getParentOp())
+    if (auto name = owner->getAttrOfType<StringAttr>(
+            SymbolTable::getSymbolAttrName()))
+      components.push_back(name.getValue());
+  if (components.empty())
     return "anonymous";
-  if (auto name = symbol->getAttrOfType<StringAttr>(
-          SymbolTable::getSymbolAttrName()))
-    return name.getValue();
-  return "anonymous";
+  std::string qualified;
+  llvm::raw_string_ostream stream(qualified);
+  llvm::interleave(llvm::reverse(components), stream, "/");
+  return qualified;
 }
 
 static std::string getStableValueName(Value value, LayoutKind kind,
@@ -210,15 +215,15 @@ static std::string getStableValueName(Value value, LayoutKind kind,
         break;
       ++operationOrdinal;
     }
-    stream << getSymbolName(symbol) << "/b" << blockOrdinal << "/o"
-           << operationOrdinal << "/r" << result.getResultNumber() << "/"
-           << kindName;
+    stream << getQualifiedSymbolName(operation) << "/b" << blockOrdinal
+           << "/o" << operationOrdinal << "/r" << result.getResultNumber()
+           << "/" << kindName;
     return name;
   }
   if (auto argument = dyn_cast<BlockArgument>(value)) {
     Operation *owner = argument.getOwner()->getParentOp();
     Operation *symbol = findEnclosingSymbol(owner);
-    stream << getSymbolName(symbol) << "/b"
+    stream << getQualifiedSymbolName(owner) << "/b"
            << getBlockOrdinal(symbol, argument.getOwner()) << "/arg"
            << argument.getArgNumber() << "/" << kindName;
     return name;
@@ -309,17 +314,28 @@ collectLayoutConstraints(Operation *root, LayoutTarget &target) {
 
   for (Value source : sourceOrder) {
     ArrayRef<LayoutVarID> ids = viewsBySource.find(source)->second;
-    SmallVector<LayoutCandidate> explicitSeeds;
+    SmallVector<std::pair<LayoutVarID, LayoutCandidate>> explicitSeeds;
     for (LayoutVarID id : ids)
-      llvm::append_range(explicitSeeds, graph.getVariable(id).candidates);
+      for (const LayoutCandidate &candidate : graph.getVariable(id).candidates)
+        explicitSeeds.emplace_back(id, candidate);
     for (LayoutVarID id : ids) {
       LayoutVar &var = graph.getVariable(id);
-      for (const LayoutCandidate &seed : explicitSeeds)
+      for (const auto &[sourceID, seed] : explicitSeeds)
         if (llvm::none_of(var.candidates,
                           [&](const LayoutCandidate &candidate) {
               return candidate.value == seed.value;
-            }))
-          var.candidates.push_back(seed);
+            })) {
+          LayoutCandidate propagated = seed;
+          std::optional<ProvenanceID> parent;
+          if (seed.provenance != kInvalidProvenanceID &&
+              seed.provenance < graph.getProvenances().size())
+            parent = seed.provenance;
+          std::string reason = "candidate propagated from " +
+                               graph.getVariable(sourceID).stableName;
+          propagated.provenance = graph.addProvenance(
+              parent, var.anchor, "same-source-layout-view", reason);
+          var.candidates.push_back(propagated);
+        }
       updateState(var);
     }
     for (size_t index = 1; index < ids.size(); ++index)

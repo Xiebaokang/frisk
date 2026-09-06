@@ -41,9 +41,6 @@ module {
 // CHECK-LABEL: func.func @non_identity_memref_layout
 // CHECK: frisk.layout_view
 
-// CHECK-LABEL: func.func @unsupported_identity_element_type
-// CHECK: frisk.layout_view
-
 module {
   func.func @identity_without_layout_anchor(%source: memref<4xf16, 3>)
       -> memref<4xf16, 3> {
@@ -72,14 +69,5 @@ module {
       : memref<4xf16, affine_map<(d0) -> (d0 * 2)>, 3>
         -> memref<4xf16, affine_map<(d0) -> (d0 * 2)>, 3>
     return %view : memref<4xf16, affine_map<(d0) -> (d0 * 2)>, 3>
-  }
-}
-
-module {
-  func.func @unsupported_identity_element_type(
-      %source: memref<4xcomplex<f16>, 3>) -> memref<4xcomplex<f16>, 3> {
-    %view = frisk.layout_view %source {layout = #linear}
-      : memref<4xcomplex<f16>, 3> -> memref<4xcomplex<f16>, 3>
-    return %view : memref<4xcomplex<f16>, 3>
   }
 }

@@ -629,6 +629,35 @@ FailureOr<SmallVector<int64_t>> getStaticDomain(Attribute map) {
   return failure();
 }
 
+FailureOr<SmallVector<int64_t>> getStaticOutputExtents(Attribute map) {
+  if (auto affine = dyn_cast<AffineLayoutMapAttr>(map)) {
+    SmallVector<int64_t> extents(affine.getOutputExtents().asArrayRef());
+    if (llvm::is_contained(extents, ShapedType::kDynamic))
+      return failure();
+    return extents;
+  }
+  if (auto bitLinear = dyn_cast<BitLinearLayoutMapAttr>(map)) {
+    SmallVector<int64_t> extents;
+    extents.reserve(bitLinear.getOutputBitWidths().size());
+    for (int64_t width : bitLinear.getOutputBitWidths().asArrayRef()) {
+      if (width < 0 || width >= 63)
+        return failure();
+      extents.push_back(int64_t{1} << width);
+    }
+    return extents;
+  }
+  if (auto product = dyn_cast<ProductLayoutMapAttr>(map)) {
+    SmallVector<int64_t> extents(
+        cast<AffineLayoutMapAttr>(product.getOuter())
+            .getOutputExtents()
+            .asArrayRef());
+    if (llvm::is_contained(extents, ShapedType::kDynamic))
+      return failure();
+    return extents;
+  }
+  return failure();
+}
+
 FailureOr<uint64_t> getPointCount(ArrayRef<int64_t> extents) {
   uint64_t count = 1;
   for (int64_t extent : extents) {
@@ -658,6 +687,24 @@ LogicalResult enumeratePoints(
     }
   }
   return success();
+}
+
+LogicalResult verifyLayoutOutputBounds(Attribute map,
+                                       ArrayRef<int64_t> domain) {
+  FailureOr<SmallVector<int64_t>> extents = getStaticOutputExtents(map);
+  if (failed(extents))
+    return failure();
+  bool inBounds = true;
+  if (failed(enumeratePoints(domain, [&](ArrayRef<int64_t> point) {
+        FailureOr<SmallVector<int64_t>> output = evaluateLayout(map, point);
+        if (failed(output) || output->size() != extents->size())
+          return failure();
+        for (auto [coordinate, extent] : llvm::zip_equal(*output, *extents))
+          inBounds &= extent > 0 && coordinate >= 0 && coordinate < extent;
+        return success();
+      })))
+    return failure();
+  return success(inBounds);
 }
 
 ArrayAttr selectNames(MLIRContext *context, ArrayAttr names,
@@ -1260,6 +1307,8 @@ FailureOr<uint64_t> getStorageFootprintBytes(StorageLayoutAttr layout,
                                              MemRefType type) {
   if (!type.hasStaticShape() || !type.getElementType().isIntOrFloat())
     return failure();
+  if (failed(verifyLayoutOutputBounds(layout.getMap(), type.getShape())))
+    return failure();
   uint64_t elementBits = type.getElementTypeBitWidth();
   SmallVector<std::pair<uint64_t, uint64_t>> intervals;
   if (failed(enumeratePoints(type.getShape(), [&](ArrayRef<int64_t> point) {
@@ -1300,6 +1349,10 @@ LogicalResult StorageLayoutAttr::verifyForType(ShapedType type,
   if (!typeSpace || *typeSpace != getMemorySpace().getValue())
     return emitError(loc)
            << "storage encoding memory space must match the MemRefType";
+  if (!memref.getElementType().isIntOrFloat())
+    return emitError(loc)
+           << "storage encoding supports only integer or floating-point "
+              "element types";
   if (failed(verifyMapDomainMatchesType(getMap(), type, loc)))
     return failure();
 
@@ -1325,8 +1378,10 @@ LogicalResult StorageLayoutAttr::verifyForType(ShapedType type,
     return emitError(loc)
            << "storage map produced a negative byte offset or bit offset "
               "outside [0, 8)";
-  if (memref.getElementType().isIntOrFloat() &&
-      failed(getStorageFootprintBytes(*this, memref)))
+  if (failed(verifyLayoutOutputBounds(getMap(), type.getShape())))
+    return emitError(loc)
+           << "storage map results must stay within declared output extents";
+  if (failed(getStorageFootprintBytes(*this, memref)))
     return emitError(loc)
            << "storage element bit ranges must be provably non-overlapping";
   return success();

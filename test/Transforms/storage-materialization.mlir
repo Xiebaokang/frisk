@@ -118,6 +118,22 @@ module {
            affine_map<(d0, d1) -> (d0 * 20 + d1 * 2)>, 3>) -> ()
     return
   }
+
+  module @left {
+    func.func @same(%source: memref<4xf16, 3>) {
+      %view = frisk.layout_view %source
+        : memref<4xf16, 3> -> memref<4xf16, 3>
+      return
+    }
+  }
+
+  module @right {
+    func.func @same(%source: memref<4xf16, 3>) {
+      %view = frisk.layout_view %source
+        : memref<4xf16, 3> -> memref<4xf16, 3>
+      return
+    }
+  }
 }
 
 // CHECK-LABEL: func.func @materialize_alloc
@@ -139,3 +155,9 @@ module {
 // CHECK: memory_space = #frisk<memory_space Global>
 // CHECK: output_extents = [160, 8]{{.*}}memory_space = #frisk<memory_space Shared>
 // CHECK: frisk.copy
+// CHECK: module @left
+// CHECK: func.func @same
+// CHECK: frisk.layout_view {{.*}} {layout = #frisk.storage<
+// CHECK: module @right
+// CHECK: func.func @same
+// CHECK: frisk.layout_view {{.*}} {layout = #frisk.storage<

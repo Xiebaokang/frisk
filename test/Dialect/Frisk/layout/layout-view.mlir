@@ -58,6 +58,42 @@ module {
 
 // -----
 
+#out_of_bounds = #frisk.storage<
+  map = #frisk.affine_layout<inputs = ["dim0"], input_extents = [4],
+    outputs = ["byte_offset", "bit_offset"], output_extents = [8, 8],
+    map = affine_map<(d0) -> (d0 * 4, 0)>>,
+  memory_space = #frisk<memory_space Shared>, alignment = 2,
+  vector_granularity = 2>
+
+module {
+  func.func @result_exceeds_declared_extent(%source: memref<4xf16, 3>) {
+    // expected-error@+1 {{storage map results must stay within declared output extents}}
+    %view = frisk.layout_view %source {layout = #out_of_bounds}
+      : memref<4xf16, 3> -> memref<4xf16, 3>
+    return
+  }
+}
+
+// -----
+
+#complex_layout = #frisk.storage<
+  map = #frisk.affine_layout<inputs = ["dim0"], input_extents = [4],
+    outputs = ["byte_offset", "bit_offset"], output_extents = [8, 8],
+    map = affine_map<(d0) -> (d0 * 2, 0)>>,
+  memory_space = #frisk<memory_space Shared>, alignment = 2,
+  vector_granularity = 2>
+
+module {
+  func.func @unsupported_element_type(%source: memref<4xcomplex<f16>, 3>) {
+    // expected-error@+1 {{storage encoding supports only integer or floating-point element types}}
+    %view = frisk.layout_view %source {layout = #complex_layout}
+      : memref<4xcomplex<f16>, 3> -> memref<4xcomplex<f16>, 3>
+    return
+  }
+}
+
+// -----
+
 #aliasing = #frisk.storage<
   map = #frisk.affine_layout<inputs = ["dim0"], input_extents = [4],
     outputs = ["byte_offset", "bit_offset"], output_extents = [1, 8],

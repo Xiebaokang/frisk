@@ -4,9 +4,11 @@
 
 #include "gtest/gtest.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/Parser/Parser.h"
 
 using namespace mlir;
 using namespace mlir::frisk;
@@ -140,6 +142,46 @@ TEST_F(LayoutPropagationTest, SM90EnumeratesVerifiedStorageCandidates) {
       EXPECT_TRUE(
           succeeded(target->verifyCandidate(var, candidate.value, loc)));
   }
+}
+
+TEST_F(LayoutPropagationTest, AliasSeedRecordsPropagationProvenance) {
+  context.getOrLoadDialect<FriskDialect>();
+  context.getOrLoadDialect<func::FuncDialect>();
+  OwningOpRef<ModuleOp> module = parseSourceString<ModuleOp>(R"mlir(
+    #linear = #frisk.storage<
+      map = #frisk.affine_layout<inputs = ["dim0"], input_extents = [4],
+        outputs = ["byte_offset", "bit_offset"], output_extents = [8, 8],
+        map = affine_map<(d0) -> (d0 * 2, 0)>>,
+      memory_space = #frisk<memory_space Shared>, alignment = 2,
+      vector_granularity = 2>
+    module {
+      func.func @alias_provenance(%source: memref<4xf16, 3>) {
+        %bound = frisk.layout_view %source {layout = #linear}
+          : memref<4xf16, 3> -> memref<4xf16, 3>
+        %inferred = frisk.layout_view %source
+          : memref<4xf16, 3> -> memref<4xf16, 3>
+        return
+      }
+    }
+  )mlir", &context);
+  ASSERT_TRUE(module);
+  std::unique_ptr<LayoutTarget> target = createSM90LayoutTarget();
+  FailureOr<LayoutConstraintGraph> graph =
+      collectLayoutConstraints(module->getOperation(), *target);
+  ASSERT_TRUE(succeeded(graph));
+
+  auto inferred = llvm::find_if(graph->getVariables(), [](const LayoutVar &var) {
+    return StringRef(var.stableName).contains("/o1/r0/storage");
+  });
+  ASSERT_NE(inferred, graph->getVariables().end());
+  ASSERT_EQ(inferred->candidates.size(), 1u);
+  std::string chain;
+  llvm::raw_string_ostream stream(chain);
+  ASSERT_TRUE(succeeded(graph->printProvenanceChain(
+      inferred->candidates.front().provenance, stream)));
+  EXPECT_NE(chain.find("same-source-layout-view"), std::string::npos);
+  EXPECT_NE(chain.find("layout_view: explicit layout binding"),
+            std::string::npos);
 }
 
 } // namespace
