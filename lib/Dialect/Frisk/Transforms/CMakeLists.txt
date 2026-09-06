@@ -1,5 +1,6 @@
 add_frisk_library(FriskTransforms
     LayoutInfer.cpp
+    MaterializeLayouts.cpp
 
     DEPENDS FriskTransformsIncGen
 

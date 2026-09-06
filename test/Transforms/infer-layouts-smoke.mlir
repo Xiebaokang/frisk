@@ -1,4 +1,4 @@
-// RUN: frisk-opt %s -pass-pipeline='builtin.module(func.func(frisk-infer-layouts))' | FileCheck %s
+// RUN: frisk-opt %s -frisk-infer-layouts | FileCheck %s
 
 module {
   func.func @smoke() {

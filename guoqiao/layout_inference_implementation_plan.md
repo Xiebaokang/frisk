@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++17、LLVM/MLIR ODS/TableGen、MLIR Pass/Dialect Conversion、Affine/Presburger、SCF、MemRef、Tensor、GPU/NVGPU/NVVM、LLVM ADT/APInt、CMake/Ninja、llvm-lit/FileCheck、CTest、CUDA/Nsight 性能工具。
 
-> **执行状态（2026-08-30）：M0、M1 已完成并通过 Gate；下一未完成里程碑为 M2（Task 10）。**
+> **执行状态（2026-09-06）：M0、M1、M2 已完成并通过 Gate；下一未完成里程碑为 M3（Task 14）。**
 
 ## Global Constraints
 
@@ -1197,7 +1197,7 @@ adapter 对每个 logical point 完成新旧差分，动态 Affine proof 的 `Un
 
 `layout` 在推断前可省略，在 materialization 后必须存在。
 
-- [ ] **Step 1: 写 parse/verify 红灯测试**
+- [X] **Step 1: 写 parse/verify 红灯测试**
 
 覆盖合法 view、source/result type 不同、global view 绑定 shared layout、非单射 storage map。
 
@@ -1211,7 +1211,7 @@ Run: `cmake --build build --target check-frisk --parallel 32`。
 
 Expected: FAIL，Op 尚不存在。
 
-- [ ] **Step 2: 定义 Op 和 ViewLike 语义**
+- [X] **Step 2: 定义 Op 和 ViewLike 语义**
 
 ODS 约束：一个 `AnyMemRef` operand、同类型 `AnyMemRef` result、可选 `StorageLayoutAttr`，实现 `ViewLikeOpInterface` 和无副作用 view 语义。C++ verifier 调用 `layout.verifyForType(getResult().getType(), getLoc())`。
 
@@ -1219,7 +1219,7 @@ ODS 约束：一个 `AnyMemRef` operand、同类型 `AnyMemRef` result、可选 
 Value LayoutViewOp::getViewSource() { return getSource(); }
 ```
 
-- [ ] **Step 3: 实现 canonicalization**
+- [X] **Step 3: 实现 canonicalization**
 
 只允许以下折叠：
 
@@ -1230,7 +1230,7 @@ layout_view(x, identity storage)  -> x，仅当无下游 layout anchor 依赖该
 
 两个不同 storage binding 不得折叠或覆盖。
 
-- [ ] **Step 4: 运行 IR tests**
+- [X] **Step 4: 运行 IR tests**
 
 Run:
 
@@ -1240,7 +1240,7 @@ cmake --build build --target FriskIR check-frisk --parallel 32
 
 Expected: layout-view tests PASS，非法 case 输出指定诊断。
 
-- [ ] **Step 5: 提交 layout view**
+- [X] **Step 5: 提交 layout view**
 
 ```bash
 git add include/Dialect/Frisk/IR lib/Dialect/Frisk/IR test
@@ -1332,7 +1332,7 @@ public:
 };
 ```
 
-- [ ] **Step 1: 写 stable-ID 和 invariant 红灯测试**
+- [X] **Step 1: 写 stable-ID 和 invariant 红灯测试**
 
 测试相同逻辑输入在不同插入顺序下，按 `stableName` finalize 后 ID/constraint 顺序一致；重复变量名、无效 var 引用和空 hard constraint 必须失败。
 
@@ -1340,7 +1340,7 @@ Run: `cmake --build build --target FriskLayoutUnitTests --parallel 32`。
 
 Expected: FAIL，graph 尚不存在。
 
-- [ ] **Step 2: 实现 graph ownership**
+- [X] **Step 2: 实现 graph ownership**
 
 Graph 拥有 vars、constraints、provenance；`Operation*` 只用于诊断，不参与排序或 hash。稳定名称来自：
 
@@ -1348,7 +1348,7 @@ Graph 拥有 vars、constraints、provenance；`Operation*` 只用于诊断，�
 function symbol / block ordinal / operation ordinal / result-or-operand ordinal / layout kind
 ```
 
-- [ ] **Step 3: 实现 provenance chain**
+- [X] **Step 3: 实现 provenance chain**
 
 ```cpp
 struct LayoutProvenance {
@@ -1362,7 +1362,7 @@ struct LayoutProvenance {
 
 提供 `printProvenanceChain(ProvenanceID, raw_ostream&)`，检测 parent cycle。
 
-- [ ] **Step 4: 验证确定性和诊断**
+- [X] **Step 4: 验证确定性和诊断**
 
 Run:
 
@@ -1374,7 +1374,7 @@ cmake --build build --target FriskLayoutUnitTests --parallel 32
 
 Expected: PASS；两种插入顺序 dump 完全相同。
 
-- [ ] **Step 5: 提交 constraint graph**
+- [X] **Step 5: 提交 constraint graph**
 
 ```bash
 git add include/Dialect/Frisk/Analysis lib/Dialect/Frisk/Analysis unittests
@@ -1415,7 +1415,7 @@ LogicalResult propagateStrict(LayoutConstraintGraph &graph);
 LogicalResult propagateCommonToFixedPoint(LayoutConstraintGraph &graph);
 ```
 
-- [ ] **Step 1: 写 storage propagation 红灯测试**
+- [X] **Step 1: 写 storage propagation 红灯测试**
 
 输入包含两个 `layout_view` 和一个 Copy；src 有 storage binding、dst 未绑定。预期 pass 后 dst 获得数学等价 binding。另一个 split case 给 src/dst 不兼容 hard seed，预期诊断包含两条 provenance。
 
@@ -1423,7 +1423,7 @@ Run: `cmake --build build --target check-frisk --parallel 32`。
 
 Expected: FAIL，pass 仍只写 smoke attr。
 
-- [ ] **Step 2: 收集 Storage variables 和 constraints**
+- [X] **Step 2: 收集 Storage variables 和 constraints**
 
 Collector 规则：
 
@@ -1436,13 +1436,13 @@ copy whole-tile src/dst -> StorageAccess(hard relation) + coalescing Preference
 
 Task 12 只接受 whole-tile、静态 shape copy；其他 case 返回明确 unsupported diagnostic。
 
-- [ ] **Step 3: 实现 bootstrap SM90 storage candidates**
+- [X] **Step 3: 实现 bootstrap SM90 storage candidates**
 
 `SM90LayoutTarget` 首版只生成：linear、transpose、必要 padding、32B/64B/128B XOR swizzle。每个候选必须先通过 Storage verifier；候选按固定枚举序号排序。
 
 这里的 candidate generation 仅用于初始化尚无 hard seed 的变量 domain；它发生在 fixed-point propagation 之前，不执行全局优选。完整候选生成、剪枝和 beam search 由 Task 23 接管。
 
-- [ ] **Step 4: 实现单调传播**
+- [X] **Step 4: 实现单调传播**
 
 Strict 只处理 singleton seed、SameLayout 和 exact AliasLayout。Common 只执行交集/关系投影：
 
@@ -1457,7 +1457,7 @@ while (!worklist.empty()) {
 
 空集合进入 Conflict 并输出两条 seed provenance；传播循环内部不得新增 candidate。
 
-- [ ] **Step 5: 验证收敛和顺序独立**
+- [X] **Step 5: 验证收敛和顺序独立**
 
 Run:
 
@@ -1469,7 +1469,7 @@ cmake --build build --target FriskLayoutUnitTests check-frisk --parallel 32
 
 Expected: PASS；随机打乱初始 constraint vector 后 canonical graph dump 不变。
 
-- [ ] **Step 6: 提交 storage propagation**
+- [X] **Step 6: 提交 storage propagation**
 
 ```bash
 git add include/Dialect/Frisk/Analysis lib/Dialect/Frisk test unittests
@@ -1521,7 +1521,7 @@ LogicalResult verifyMaterializedLayouts(Operation *root,
                                         LayoutTarget &target);
 ```
 
-- [ ] **Step 1: 写未物化和错误物化红灯测试**
+- [X] **Step 1: 写未物化和错误物化红灯测试**
 
 覆盖 unresolved layout_view、错误 memory space、非单射 map、alias views 不一致。诊断检查：
 
@@ -1534,21 +1534,21 @@ Run: `cmake --build build --target check-frisk --parallel 32`。
 
 Expected: FAIL，verifier/materializer 尚不存在。
 
-- [ ] **Step 2: 实现严格受限的 bootstrap resolver**
+- [X] **Step 2: 实现严格受限的 bootstrap resolver**
 
 为使 M2/M3 在完整求解器之前可执行，实现只面向纵向切片的 exhaustive resolver：component 最多 8 个变量、每个 domain 最多 4 个候选；只接受满足全部 hard constraint 的 assignment，并按 candidate stable ordinal 序列决定唯一结果。超过边界直接诊断 `bootstrap layout solver limit exceeded`，不得截断或猜测。
 
 M2 不枚举 conversion/rematerialization；Task 15 扩展该 resolver 处理一个多 consumer conversion edge，Task 23 必须以正式 CostVector/beam solver 替换并删除它。
 
-- [ ] **Step 3: 实现 solved graph verifier**
+- [X] **Step 3: 实现 solved graph verifier**
 
 逐 assignment 检查 kind、type、coverage/injectivity、alias 和 Copy relation。失败信息包含稳定 var 名、candidate、constraint rule 和 provenance chain。
 
-- [ ] **Step 4: 实现 Storage materialization**
+- [X] **Step 4: 实现 Storage materialization**
 
 Materializer 只给现有 `LayoutViewOp` 设置求解出的 `layout` attr；若 solution 中的 Attr 与已有 hard binding 不等价则立即失败，不覆盖。
 
-- [ ] **Step 5: 将 pass 变成真正 orchestrator**
+- [X] **Step 5: 将 pass 变成真正 orchestrator**
 
 `FriskInferLayoutsPass::runOnOperation()` 顺序固定为：
 
@@ -1564,7 +1564,7 @@ verifyMaterializedLayouts(getOperation(), target);
 
 任一步失败调用 `signalPassFailure()`；删除 M0 的 smoke attr。
 
-- [ ] **Step 6: 运行端到端测试**
+- [X] **Step 6: 运行端到端测试**
 
 Run:
 
@@ -1576,7 +1576,7 @@ cmake --build build --target FriskTransforms FriskLayoutUnitTests check-frisk --
 
 Expected: Storage 输入推断并打印 canonical binding；冲突 case 输出两条 provenance；所有测试 PASS。
 
-- [ ] **Step 7: 同步设计并提交**
+- [X] **Step 7: 同步设计并提交**
 
 如果实际 pass 阶段边界与设计 Section 8 不同，先更新设计文档。
 

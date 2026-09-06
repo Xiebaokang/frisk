@@ -5,6 +5,7 @@ add_unittest(FriskUnitTests FriskLayoutUnitTests
   LayoutInterfaceTest.cpp
   LayoutConstraintTest.cpp
   LayoutPropagationTest.cpp
+  LayoutVerifierTest.cpp
   LegacyLayoutAdapterTest.cpp
   ProductLayoutTest.cpp
 )

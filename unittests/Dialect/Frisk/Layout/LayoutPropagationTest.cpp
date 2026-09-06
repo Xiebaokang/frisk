@@ -97,16 +97,22 @@ TEST_F(LayoutPropagationTest, IncompatibleHardSeedsConflict) {
 
 TEST_F(LayoutPropagationTest, SM90EnumeratesVerifiedStorageCandidates) {
   context.getOrLoadDialect<FriskDialect>();
-  auto matrixType = MemRefType::get({64, 64}, builder.getF16Type(), {}, 3);
-  LayoutVar var{0, LayoutKind::Storage, matrixType, {},
-                LayoutState::Uninitialized, "matrix", nullptr};
   std::unique_ptr<LayoutTarget> target = createSM90LayoutTarget();
-  SmallVector<LayoutCandidate> candidates;
-  target->enumerateCandidates(var, candidates);
+  for (auto [columns, xorOrdinal] :
+       {std::pair<int64_t, uint64_t>{16, 3}, {32, 4}, {64, 5}}) {
+    auto matrixType =
+        MemRefType::get({64, columns}, builder.getF16Type(), {}, 3);
+    LayoutVar var{0, LayoutKind::Storage, matrixType, {},
+                  LayoutState::Uninitialized, "matrix", nullptr};
+    SmallVector<LayoutCandidate> candidates;
+    target->enumerateCandidates(var, candidates);
 
-  ASSERT_EQ(candidates.size(), 6u);
-  for (const LayoutCandidate &candidate : candidates)
-    EXPECT_TRUE(succeeded(target->verifyCandidate(var, candidate.value, loc)));
+    ASSERT_EQ(candidates.size(), 4u);
+    EXPECT_EQ(candidates.back().stableOrdinal, xorOrdinal);
+    for (const LayoutCandidate &candidate : candidates)
+      EXPECT_TRUE(
+          succeeded(target->verifyCandidate(var, candidate.value, loc)));
+  }
 }
 
 } // namespace

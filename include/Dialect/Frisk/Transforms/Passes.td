@@ -3,7 +3,7 @@
 
 include "mlir/Pass/PassBase.td"
 
-def FriskInferLayouts : InterfacePass<"frisk-infer-layouts", "FunctionOpInterface"> {
+def FriskInferLayouts : Pass<"frisk-infer-layouts", "::mlir::ModuleOp"> {
   let summary = "Infer and materialize Frisk layouts";
   let constructor = "mlir::frisk::createFriskInferLayoutsPass()";
   let dependentDialects = ["::mlir::frisk::FriskDialect"];

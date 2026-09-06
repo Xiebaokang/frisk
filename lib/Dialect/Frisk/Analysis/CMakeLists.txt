@@ -19,6 +19,7 @@ add_frisk_library(FriskLegacyLayoutAdapter
 
 add_frisk_library(FriskLayoutAnalysis
   LayoutPropagation.cpp
+  LayoutVerifier.cpp
 
   LINK_LIBS PUBLIC
   FriskAnalysis

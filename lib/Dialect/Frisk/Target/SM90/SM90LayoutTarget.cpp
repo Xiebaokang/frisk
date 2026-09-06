@@ -172,9 +172,13 @@ public:
     append(buildLinear(type), 0);
     append(buildTranspose(type), 1);
     append(buildPadded(type), 2);
-    append(buildXor(type, 32), 3);
-    append(buildXor(type, 64), 4);
-    append(buildXor(type, 128), 5);
+    if (type.getRank() == 2 && type.getElementTypeBitWidth() % 8 == 0) {
+      uint64_t rowBytes = type.getDimSize(1) *
+                          (type.getElementTypeBitWidth() / 8);
+      unsigned swizzleBytes = rowBytes <= 32 ? 32 : rowBytes <= 64 ? 64 : 128;
+      uint64_t ordinal = swizzleBytes == 32 ? 3 : swizzleBytes == 64 ? 4 : 5;
+      append(buildXor(type, swizzleBytes), ordinal);
+    }
   }
 
   LogicalResult verifyCandidate(const LayoutVar &var, Attribute candidate,

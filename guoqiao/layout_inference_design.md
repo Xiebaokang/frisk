@@ -4,6 +4,7 @@
 > 日期：2026-08-16
 > 范围：NVIDIA SM90/SM90a；布局推断、布局验证与布局物化
 > 核心选择：Local/Register Tile 使用 `RankedTensorType + EncodingAttr`，Shared/Global 保持 MemRef，由统一约束系统连接分布式布局与存储布局
+> 实施状态（2026-09-06）：M0–M2 已完成；Storage alloc/view/copy 纵向切片已形成 constraint → propagation → solve → materialization → verification 闭环
 
 ## 1. 结论先行
 
@@ -59,16 +60,17 @@ Frisk 应采用已经确认的 MLIR-native 双域 IR 架构，并进行以下重
 
 ### 3.1 Frisk 当前状态
 
-当前实现已经包含 SM80/SM90 GEMM 和 Reduce 的若干局部布局构造逻辑，但还不是完整的布局推断系统：
+当前实现已经完成 Storage 纵向切片，但 Distributed Tensor、显式 conversion 和完整 SM90 指令契约仍未实现：
 
 - `LayoutAttr` 同时包含 `forwardIndex`、`forwardThread` 和 `replicateSize`，混合了存储布局、线程分布和复制语义。
 - `forwardIndex/forwardThread` 只用 `AffineMapAttr` 表示，无法自然表达 XOR swizzle。
 - `LayoutInterface::inferLayout` 通过 `DenseMap<Value, Attribute>` 原地更新布局，接口没有表达约束、冲突原因、候选和代价。
-- `LayoutInfer.cpp` 目前只有 pass 壳，没有模块级 fixed-point、验证与物化。
-- `LogicalResult` 被同时当成“成功/失败”和“是否变化”使用，不适合作为 fixed-point 状态。
-- `gemm/copy/fill/reduce` 等写内存的操作当前被标记为 `Pure`，会破坏 DCE、重排、别名和依赖分析的正确性。
+- `frisk.layout_view` 已提供 Shared/Global Storage binding；module 级 `frisk-infer-layouts` 已依次执行约束收集、strict/common 传播、受限求解、物化和二次验证。
+- constraint graph 使用函数/block/op/result 组成的稳定名称；hard conflict 可输出两条 seed provenance。
+- M2 bootstrap resolver 只处理每连通分量最多 8 个变量、每个 domain 最多 4 个候选，不枚举 conversion/rematerialization；二维 Storage domain 为 linear、transpose、padding 和按行字节选择的一个 32B/64B/128B XOR 候选。
+- `gemm/copy/fill/reduce` 的 MemoryEffect 已修正；M2 collector 目前只接收静态 whole-tile Copy，其他 Copy 明确诊断 unsupported。
 - Parallel 内的递归推断只覆盖部分操作，没有形成统一的 Op Interface 调度。
-- 推断结果还没有完整进入 Frisk → NVGPU/NVVM 的 conversion pipeline，因此当前布局正确并不等于最终代码质量正确。
+- Storage binding 已进入 Frisk IR，但推断结果还没有完整进入 Frisk → NVGPU/NVVM 的 conversion pipeline，因此当前布局正确并不等于最终代码质量正确。
 
 因此，第一步必须先修正 IR 语义和接口，而不是继续向现有 `LayoutAttr` 追加特殊字段。
 
@@ -873,6 +875,8 @@ NVIDIA 对 compute capability 9 的 TMA swizzle 给出了 32B/64B/128B 模式及
 验收：代数单测和小 tile 枚举 oracle 全过；现有 SM90 fragment/swizzle 均可无损表达。
 
 ### M2：Storage 纵向切片
+
+状态：已完成（2026-09-06）。`frisk-infer-layouts` 是 module pass，固定执行 collect、strict propagation、common fixed-point、bootstrap solve、solved verification、materialization 和 materialized verification；候选默认按 stable ordinal 决定，完整 CostVector/beam 选择仍按计划留在 M5。
 
 工作：
 

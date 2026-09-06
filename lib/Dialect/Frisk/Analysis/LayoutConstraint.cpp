@@ -77,6 +77,14 @@ static bool isCommutativeConstraint(ConstraintKind kind) {
          kind == ConstraintKind::StorageAccess;
 }
 
+static std::string getStableAttributeText(Attribute attribute) {
+  if (!attribute)
+    return {};
+  std::string text;
+  llvm::raw_string_ostream(text) << attribute;
+  return text;
+}
+
 LogicalResult LayoutConstraintGraph::finalize(Location loc) {
   if (failed(verifyInvariants(loc)))
     return failure();
@@ -115,6 +123,10 @@ LogicalResult LayoutConstraintGraph::finalize(Location loc) {
     if (lhs.vars != rhs.vars)
       return std::lexicographical_compare(lhs.vars.begin(), lhs.vars.end(),
                                           rhs.vars.begin(), rhs.vars.end());
+    std::string lhsEncoding = getStableAttributeText(lhs.requiredEncoding);
+    std::string rhsEncoding = getStableAttributeText(rhs.requiredEncoding);
+    if (lhsEncoding != rhsEncoding)
+      return lhsEncoding < rhsEncoding;
     const LayoutProvenance &lhsProv = provenances[lhs.provenance];
     const LayoutProvenance &rhsProv = provenances[rhs.provenance];
     return std::tie(lhsProv.rule, lhsProv.reason) <

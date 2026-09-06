@@ -11,6 +11,7 @@
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/SymbolTable.h"
 
 namespace mlir::frisk {
 
@@ -48,7 +49,9 @@ bool filterCompatible(LayoutVar &var, ArrayRef<LayoutCandidate> other,
 }
 
 LogicalResult emitConflict(const LayoutConstraintGraph &graph,
-                           const LayoutConstraint &constraint) {
+                           const LayoutConstraint &constraint,
+                           ArrayRef<LayoutCandidate> lhsSeeds = {},
+                           ArrayRef<LayoutCandidate> rhsSeeds = {}) {
   const LayoutProvenance &provenance =
       graph.getProvenances()[constraint.provenance];
   if (!provenance.source)
@@ -56,12 +59,20 @@ LogicalResult emitConflict(const LayoutConstraintGraph &graph,
   InFlightDiagnostic diagnostic = provenance.source->emitError(
       "conflicting hard layout constraint '");
   diagnostic << provenance.rule << "': " << provenance.reason;
-  for (LayoutVarID id : constraint.vars) {
-    const LayoutVar &var = graph.getVariable(id);
-    diagnostic.attachNote(provenance.source->getLoc())
-        << "layout variable " << var.stableName
-        << " has no compatible candidate";
-  }
+  auto attachSeed = [&](unsigned index, ArrayRef<LayoutCandidate> seeds) {
+    if (index >= constraint.vars.size() || seeds.empty())
+      return;
+    const LayoutCandidate &seed = seeds.front();
+    std::string chain;
+    llvm::raw_string_ostream stream(chain);
+    if (seed.provenance < graph.getProvenances().size() &&
+        succeeded(graph.printProvenanceChain(seed.provenance, stream)))
+      diagnostic.attachNote(provenance.source->getLoc())
+          << "seed for " << graph.getVariable(constraint.vars[index]).stableName
+          << ": " << chain;
+  };
+  attachSeed(0, lhsSeeds);
+  attachSeed(1, rhsSeeds);
   return failure();
 }
 
@@ -83,7 +94,7 @@ LogicalResult applyEqualityConstraint(LayoutConstraintGraph &graph,
           rhs.state == LayoutState::Conflict) {
         lhs.state = LayoutState::Conflict;
         rhs.state = LayoutState::Conflict;
-        return emitConflict(graph, constraint);
+        return emitConflict(graph, constraint, lhsSnapshot, rhsSnapshot);
       }
     }
   }
@@ -111,16 +122,59 @@ bool isWholeTileStaticCopy(CopyOp copy) {
 
 } // namespace
 
+static StringRef findEnclosingSymbol(Operation *operation) {
+  for (Operation *owner = operation; owner; owner = owner->getParentOp())
+    if (auto name = owner->getAttrOfType<StringAttr>(
+            SymbolTable::getSymbolAttrName()))
+      return name.getValue();
+  return "anonymous";
+}
+
+static std::string getStableValueName(Value value, LayoutKind kind,
+                                      uint64_t fallbackOrdinal) {
+  std::string name;
+  llvm::raw_string_ostream stream(name);
+  StringRef kindName =
+      kind == LayoutKind::Storage ? "storage" : "distributed";
+  if (auto result = dyn_cast<OpResult>(value)) {
+    Operation *operation = result.getOwner();
+    Block *block = operation->getBlock();
+    unsigned blockOrdinal = 0;
+    if (Region *region = block->getParent()) {
+      for (Block &candidate : *region) {
+        if (&candidate == block)
+          break;
+        ++blockOrdinal;
+      }
+    }
+    unsigned operationOrdinal = 0;
+    for (Operation &candidate : *block) {
+      if (&candidate == operation)
+        break;
+      ++operationOrdinal;
+    }
+    stream << findEnclosingSymbol(operation) << "/b" << blockOrdinal << "/o"
+           << operationOrdinal << "/r" << result.getResultNumber() << "/"
+           << kindName;
+    return name;
+  }
+  if (auto argument = dyn_cast<BlockArgument>(value)) {
+    Operation *owner = argument.getOwner()->getParentOp();
+    stream << findEnclosingSymbol(owner) << "/b0/arg"
+           << argument.getArgNumber() << "/" << kindName;
+    return name;
+  }
+  stream << "anonymous/fallback" << fallbackOrdinal << "/" << kindName;
+  return name;
+}
+
 LayoutVarID LayoutConstraintBuilder::getOrCreate(Value value,
                                                  LayoutKind kind) {
   auto found = variablesByValue.find(value);
   if (found != variablesByValue.end())
     return found->second;
 
-  std::string name;
-  llvm::raw_string_ostream(name)
-      << (kind == LayoutKind::Storage ? "storage/" : "distributed/")
-      << llvm::format_hex_no_prefix(nextStableOrdinal++, 8);
+  std::string name = getStableValueName(value, kind, nextStableOrdinal++);
   Operation *anchor = value.getDefiningOp<LayoutViewOp>();
   LayoutVarID id = graph.addVariable(kind, value.getType(), name, anchor);
   variablesByValue.try_emplace(value, id);

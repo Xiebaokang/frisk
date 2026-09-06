@@ -2,6 +2,7 @@
 #define FRISK_TRANSFORMS_PASSES_H
 
 #include "mlir/Pass/Pass.h"
+#include "mlir/IR/BuiltinOps.h"
 
 namespace mlir::frisk {
 

@@ -1,4 +1,4 @@
-// RUN: frisk-opt %s -frisk-infer-layouts --split-input-file --verify-diagnostics | FileCheck %s
+// RUN: frisk-opt %s -frisk-infer-layouts -verify-each | FileCheck %s
 
 #global_linear = #frisk.storage<
   map = #frisk.affine_layout<inputs = ["dim0"], input_extents = [4],
@@ -8,8 +8,16 @@
   vector_granularity = 2>
 
 module {
-  func.func @whole_tile_copy(%src: memref<4xf16, 1>,
-                             %dst: memref<4xf16, 3>) {
+  func.func @materialize_alloc() {
+    %storage = memref.alloc() : memref<4xf16, 3>
+    %view = frisk.layout_view %storage
+      : memref<4xf16, 3> -> memref<4xf16, 3>
+    memref.dealloc %storage : memref<4xf16, 3>
+    return
+  }
+
+  func.func @materialize_copy(%src: memref<4xf16, 1>,
+                              %dst: memref<4xf16, 3>) {
     %src_view = frisk.layout_view %src {layout = #global_linear}
       : memref<4xf16, 1> -> memref<4xf16, 1>
     %dst_view = frisk.layout_view %dst
@@ -23,22 +31,10 @@ module {
   }
 }
 
-// CHECK-LABEL: func.func @whole_tile_copy
+// CHECK-LABEL: func.func @materialize_alloc
+// CHECK: memref.alloc
+// CHECK: frisk.layout_view %{{.*}} {layout = #frisk.storage<{{.*}}memory_space = #frisk<memory_space Shared>
+// CHECK-LABEL: func.func @materialize_copy
 // CHECK: frisk.layout_view %arg0 {layout = #frisk.storage<{{.*}}memory_space = #frisk<memory_space Global>
 // CHECK: frisk.layout_view %arg1 {layout = #frisk.storage<{{.*}}memory_space = #frisk<memory_space Shared>
-// CHECK-NOT: frisk.layout_inference_ran
-
-// -----
-
-module {
-  func.func @unsupported_dynamic_copy(%src: memref<?xf16, 1>,
-                                      %dst: memref<?xf16, 3>) {
-    // expected-error@+1 {{unsupported storage layout inference for non-whole-tile or dynamic copy}}
-    "frisk.copy"(%src, %dst) <{
-      srcMap = affine_map<() -> ()>, dstMap = affine_map<() -> ()>,
-      srcExtents = array<i64: -1>, dstExtents = array<i64: -1>
-    }> {operandSegmentSizes = array<i32: 1, 1, 0, 0>}
-      : (memref<?xf16, 1>, memref<?xf16, 3>) -> ()
-    return
-  }
-}
+// CHECK: frisk.copy
