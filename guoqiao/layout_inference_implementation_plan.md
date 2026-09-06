@@ -1345,7 +1345,7 @@ Expected: FAIL，graph 尚不存在。
 Graph 拥有 vars、constraints、provenance；`Operation*` 只用于诊断，不参与排序或 hash。稳定名称来自：
 
 ```text
-fully-qualified ancestor symbol path / block ordinal / operation ordinal / result-or-operand ordinal / layout kind
+unambiguously encoded fully-qualified ancestor symbol path / block ordinal / operation ordinal / result-or-operand ordinal / layout kind
 ```
 
 - [X] **Step 3: 实现 provenance chain**

@@ -66,7 +66,7 @@ Frisk 应采用已经确认的 MLIR-native 双域 IR 架构，并进行以下重
 - `forwardIndex/forwardThread` 只用 `AffineMapAttr` 表示，无法自然表达 XOR swizzle。
 - `LayoutInterface::inferLayout` 通过 `DenseMap<Value, Attribute>` 原地更新布局，接口没有表达约束、冲突原因、候选和代价。
 - `frisk.layout_view` 已提供 Shared/Global Storage binding；module 级 `frisk-infer-layouts` 已依次执行约束收集、strict/common 传播、受限求解、物化和二次验证。
-- constraint graph 使用 fully-qualified ancestor symbol path/function/block/op/result 组成的稳定名称；hard conflict 可输出两条 seed provenance。
+- constraint graph 使用逐组件长度前缀编码的 fully-qualified ancestor symbol path，加上 block/op/result 组成无歧义稳定名称；hard conflict 可输出两条 seed provenance。
 - M2 bootstrap resolver 只处理每连通分量最多 8 个变量、每个 domain 最多 4 个候选，不枚举 conversion/rematerialization；二维 Storage domain 为 linear、transpose、padding 和按行字节选择的一个 32B/64B/128B XOR 候选。
 - `frisk-infer-layouts` 缺少 target 属性时按 `sm_90` bootstrap 默认值处理；若显式给出 target，则只接受 `sm90/sm_90/sm90a/sm_90a`，其他 target 在构造候选前拒绝。
 - materialized verifier 会枚举静态 logical domain，验证每个元素的 bit range 不重叠，并证明最大地址不超过底层 MemRef strided/affine type 表达的静态容量；无法证明时保守拒绝。

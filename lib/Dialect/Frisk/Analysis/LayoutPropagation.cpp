@@ -194,7 +194,13 @@ static std::string getQualifiedSymbolName(Operation *operation) {
     return "anonymous";
   std::string qualified;
   llvm::raw_string_ostream stream(qualified);
-  llvm::interleave(llvm::reverse(components), stream, "/");
+  bool first = true;
+  for (StringRef component : llvm::reverse(components)) {
+    if (!first)
+      stream << '/';
+    first = false;
+    stream << component.size() << ':' << component;
+  }
   return qualified;
 }
 

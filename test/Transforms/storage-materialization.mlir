@@ -134,6 +134,24 @@ module {
       return
     }
   }
+
+  module @"a/b" {
+    func.func @same(%source: memref<4xf16, 3>) {
+      %view = frisk.layout_view %source
+        : memref<4xf16, 3> -> memref<4xf16, 3>
+      return
+    }
+  }
+
+  module @a {
+    module @b {
+      func.func @same(%source: memref<4xf16, 3>) {
+        %view = frisk.layout_view %source
+          : memref<4xf16, 3> -> memref<4xf16, 3>
+        return
+      }
+    }
+  }
 }
 
 // CHECK-LABEL: func.func @materialize_alloc
@@ -159,5 +177,12 @@ module {
 // CHECK: func.func @same
 // CHECK: frisk.layout_view {{.*}} {layout = #frisk.storage<
 // CHECK: module @right
+// CHECK: func.func @same
+// CHECK: frisk.layout_view {{.*}} {layout = #frisk.storage<
+// CHECK: module @"a/b"
+// CHECK: func.func @same
+// CHECK: frisk.layout_view {{.*}} {layout = #frisk.storage<
+// CHECK: module @a
+// CHECK: module @b
 // CHECK: func.func @same
 // CHECK: frisk.layout_view {{.*}} {layout = #frisk.storage<
