@@ -15,10 +15,20 @@ The approved scope is Tasks 14–17 in `layout_inference_implementation_plan.md`
   assignment/edge order. Full CostVector and runtime GPU validation stay in M5/M6.
 - IR remains public RankedTensor SSA. The test-only conversion adapter may use
   per-thread vector carriers internally to expose shuffle/shared exchange.
+- StorageAccess legality is compatible logical domains and valid `S(D(h))`,
+  not coalescing. Unencoded linear/transpose consumers may share one layout;
+  separate incompatible encoded-consumer tests exercise conversion selection.
+- SCF while uses the actual MLIR two-tuple contract: init/before/yield versus
+  condition/after/results, whose scalar arities may differ. Collection of those
+  region constraints belongs to Task 16 alongside coherent type rewriting.
 
 ## Progress
 
-- [ ] Task 14: Tensor carriers, conversion verification and canonicalization.
+- [x] Task 14: Tensor carriers, conversion verification and canonicalization.
+  Commit `f87034b`; task review spec compliant / quality approved; 11 lit,
+  38 unit and 4 CTest cases passed. Symmetric invalid-source encoding regression
+  added after review; focused `--verify-diagnostics --canonicalize` passed.
+  Plan checklist updates are retained as required project progress documentation.
 - [ ] Task 15: Distributed constraints, candidates, propagation and edge solving.
 - [ ] Task 16: Tensor/SCF type conversion and selected-edge materialization.
 - [ ] Task 17: Conversion cleanup and static single-CTA test lowering.

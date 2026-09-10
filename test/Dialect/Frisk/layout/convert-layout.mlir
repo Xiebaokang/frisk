@@ -99,3 +99,22 @@ module {
 // CANON-LABEL: func.func @canonicalize
 // CANON-NOT: frisk.convert_layout
 // CANON: return %arg0
+
+// -----
+
+#source_map = #frisk.bit_linear<inputs = ["lane"], input_bits = [2],
+  outputs = ["dim0"], output_bits = [1],
+  matrix = dense<[[1, 0]]> : tensor<1x2xi1>>
+#source = #frisk.distributed<map = #source_map, topology = [1, 4, 1, 1, 1], replication = 2>
+#target_map = #frisk.bit_linear<inputs = ["lane"], input_bits = [2],
+  outputs = ["dim0"], output_bits = [2],
+  matrix = dense<[[1, 0], [0, 1]]> : tensor<2x2xi1>>
+#target = #frisk.distributed<map = #target_map, topology = [1, 4, 1, 1, 1], replication = 1>
+
+module {
+  func.func @invalid_source_encoding(%x: tensor<4xf16, #source>) {
+    // expected-error@+1 {{distributed output widths must exactly encode type extents}}
+    %bad = "frisk.convert_layout"(%x) : (tensor<4xf16, #source>) -> tensor<4xf16, #target>
+    return
+  }
+}
