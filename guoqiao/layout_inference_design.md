@@ -4,7 +4,7 @@
 > 日期：2026-08-16
 > 范围：NVIDIA SM90/SM90a；布局推断、布局验证与布局物化
 > 核心选择：Local/Register Tile 使用 `RankedTensorType + EncodingAttr`，Shared/Global 保持 MemRef，由统一约束系统连接分布式布局与存储布局
-> 实施状态（2026-09-06）：M0–M2 已完成；Storage alloc/view/copy 纵向切片已形成 constraint → propagation → solve → materialization → verification 闭环
+> 实施状态（2026-09-10）：M0–M2 已完成；M3 Task 14–17 已实现、通过逐任务审查和功能 Gate，整分支最终审查进行中。Storage 与 Distributed Tensor 均形成 collect → solve → materialize → verify 闭环，conversion 支持静态单 CTA 测试降低；可执行 GPU 运行验收仍属 M6。
 
 ## 1. 结论先行
 

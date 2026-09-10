@@ -87,15 +87,21 @@ tests failed behavior assertions; implementation made all five pass. Later
 behavior REDs caught a missing diagnostic for absent encodings and unaccounted
 dynamic shared storage. Their regressions now require explicit errors.
 
-The focused suite contains 11 tests. It enumerates every owner for selected
+The focused suite contains 13 tests. It enumerates every owner for selected
 register/lane/warp/replicated layouts, compares all 720 six-bit permutations
 with named-input column reordering, simulates i32-word transport including all
 256 i8 patterns and floating NaN/negative-zero payloads, and tests global writer
 uniqueness, row-major slots, pure register permutation, byte/alignment budgets,
 preflight rollback, and exact canonical-equivalent-but-distinct tensor types.
+An invertible non-permutation XOR map and a two-warp-group named-input
+permutation additionally check selected owners against independent scalar
+equations, including the physical lane/warp/warp_group decoding.
 FileCheck covers all eight types, lane-dependent 64-bit register selection,
 same-thread/warp replica locality, shared f16/f64 exchange, aggregate and
 pre-existing-buffer budgets, and unsupported launch/control-flow/shared memory.
+The multi-consumer fixture returns the transpose result, so inference plus
+cleanup must preserve its one conversion and live consumer; a second pass run
+is compared byte-for-byte to verify replay stability.
 
 ```bash
 cmake --build build --target FriskTransforms FriskLayoutToGPU FriskLayoutUnitTests check-frisk --parallel 32
@@ -103,12 +109,15 @@ build/unittests/Dialect/Frisk/FriskLayoutUnitTests --gtest_filter=ConversionPlan
 build/unittests/Dialect/Frisk/FriskLayoutUnitTests
 ctest --test-dir build --output-on-failure
 build/bin/frisk-opt test/Transforms/multi-consumer-layout.mlir \
-  --split-input-file -frisk-infer-layouts -frisk-optimize-layout-conversions -verify-each
+  -frisk-infer-layouts -frisk-optimize-layout-conversions -verify-each
 git diff --check
 ```
 
-The split flag is required because the multi-consumer fixture contains multiple
-independent modules. Textual tests use `-verify-each` or expected diagnostics;
+`--split-input-file` is optional for this fixture: its two functions can be
+parsed together in one module, or separated at the comment marker. The
+analysis-only test retains splitting, while the live inference+cleanup/replay
+test exercises the original unsplit gate. Textual tests use `-verify-each` or
+expected diagnostics;
 no verification-disabling escape hatch is used. Scope not covered: GPU runtime,
 full Tensor-to-LLVM lowering, arbitrary/dynamic topology, cluster communication,
 loop/barrier reuse, packed sub-byte types, optimized lookup/code generation,
@@ -119,3 +128,12 @@ Observed final gate before commit: 27/27 lit, 11/11 focused conversion tests,
 inference+cleanup command and `git diff --check` exit 0. Existing negative unit
 tests intentionally print diagnostics while passing, and CMake retains its
 pre-existing CMP0116 deprecation warning.
+
+Review follow-up adds the two ownership cases above and a live 2x2 transpose
+regression. The original rank-one `permutation = [0]` transpose legitimately
+folds even when returned; this is not a production bug. A non-identity `[1,0]`
+permutation plus an independently fixed XOR result encoding keeps a real
+consumer and exactly one input conversion, within the bootstrap limits.
+Follow-up verification: 27/27 lit, 13/13 focused tests, 74/74 full layout unit
+tests and 4/4 CTest pass; both unsplit and split M3 commands exit 0. No
+production implementation changes were needed for these review follow-ups.

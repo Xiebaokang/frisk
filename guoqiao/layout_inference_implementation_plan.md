@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++17、LLVM/MLIR ODS/TableGen、MLIR Pass/Dialect Conversion、Affine/Presburger、SCF、MemRef、Tensor、GPU/NVGPU/NVVM、LLVM ADT/APInt、CMake/Ninja、llvm-lit/FileCheck、CTest、CUDA/Nsight 性能工具。
 
-> **执行状态（2026-09-06）：M0、M1、M2 已完成并通过 Gate；下一未完成里程碑为 M3（Task 14）。**
+> **执行状态（2026-09-10）：M0–M2 已完成；M3 Task 14–17 已实现并通过逐任务审查及功能 Gate，整分支最终审查进行中。下一实施里程碑为 M4（Task 18）。**
 
 ## Global Constraints
 
@@ -1676,6 +1676,8 @@ git commit -m "feat: add distributed tensor carriers"
 
 ### Task 15: 收集 Distributed constraints 并支持多 consumer
 
+已实现并通过独立审查；接口和边界见 [Task 15 analysis](m3_task15_analysis.md)。
+
 **Files:**
 
 - Modify: `lib/Dialect/Frisk/Analysis/LayoutConstraint.cpp`
@@ -1703,7 +1705,7 @@ FailureOr<LayoutSolution> solveBootstrapLayoutGraph(
     BootstrapSolverLimits limits);
 ```
 
-- [ ] **Step 1: 写双 consumer 红灯测试**
+- [x] **Step 1: 写双 consumer 红灯测试**
 
 构造一个 `tile_load` 结果被两个 `tile_store` 使用，两个 destination view 分别绑定 linear 和 transpose storage。预期 analysis 保留两个 distributed candidate，而不是第一个 consumer 锁定结果。
 
@@ -1711,33 +1713,33 @@ Run: `cmake --build build --target check-frisk --parallel 32`。
 
 Expected: FAIL，collector 尚未创建 Distributed var。
 
-- [ ] **Step 2: 收集基础 Distributed rules**
+- [x] **Step 2: 收集基础 Distributed rules**
 
 规则固定为：
 
 ```text
 tile_load/store -> StorageAccess
 arith/math elementwise tensor op -> SameLayout(all tensor operands/results)
-tensor.transpose -> TransformLayout(permutation)
+linalg.transpose (Tensor DPS) -> TransformLayout(permutation), init/result SameLayout
 existing tensor encoding -> RequireEncoding(hard)
 existing convert_layout -> source/target RequireEncoding(hard) + Convertible edge
 ```
 
 对于未知 layout-bearing Op，pass 必须报 `operation has no layout constraint model`。
 
-- [ ] **Step 3: 生成基础 distributed candidates**
+- [x] **Step 3: 生成基础 distributed candidates**
 
 SM90 bootstrap candidates 只包含 blocked、lane-striped、warp-striped、fully-replicated；每个候选展开为 canonical map 并通过 type verifier。
 
-- [ ] **Step 4: 扩展 propagation 为双向关系投影**
+- [x] **Step 4: 扩展 propagation 为双向关系投影**
 
 StorageAccess 和 transpose 必须同时支持 producer→consumer、consumer→producer。候选集合只缩小；多 consumer 的 union-of-requirements 在 solve 前保留为 candidate alternatives，不得原地覆盖。
 
-- [ ] **Step 5: 扩展 bootstrap resolver，闭合第一条多 consumer 路径**
+- [x] **Step 5: 扩展 bootstrap resolver，闭合第一条多 consumer 路径**
 
 在既有 8-variable/4-candidate 上限内，允许每个可转换 consumer edge 枚举 `KeepCommonLayout` 或 `Convert`。目标顺序固定为：先满足 hard constraint，再最小化 conversion 数，最后比较 assignment/edge stable key；本阶段不宣称性能最优，也不枚举 rematerialization。求解结果必须把选中的 conversion 写入 `LayoutSolution::conversions`，供 Task 16 直接消费。
 
-- [ ] **Step 6: 验证 fixed-point 与多 consumer**
+- [x] **Step 6: 验证 fixed-point 与多 consumer**
 
 Run:
 
@@ -1749,7 +1751,7 @@ cmake --build build --target FriskLayoutUnitTests check-frisk --parallel 32
 
 Expected: PASS；两个 consumer 候选均存在；bootstrap solution 明确选择共同布局或单个 consumer-edge conversion；顺序打乱结果不变。
 
-- [ ] **Step 7: 提交 Distributed propagation**
+- [x] **Step 7: 提交 Distributed propagation**
 
 ```bash
 git add lib/Dialect/Frisk test unittests
@@ -1758,8 +1760,8 @@ git commit -m "feat: propagate distributed layout constraints"
 
 ### Task 16: 物化 Tensor encoding、SCF 类型和 conversion edge
 
-实现与验证记录见 [m3_task16_materialization.md](m3_task16_materialization.md)；
-其中以实际 MLIR 的双 tuple 规则修正下方原始 SCF while 简写。
+已实现并通过独立审查；实现与验证记录见 [m3_task16_materialization.md](m3_task16_materialization.md)。
+下方 SCF while 规则已按实际 MLIR 的双 tuple 契约修正。
 
 **Files:**
 
@@ -1789,7 +1791,7 @@ LogicalResult materializeDistributedLayouts(
     ArrayRef<LayoutConversionEdge> conversions);
 ```
 
-- [ ] **Step 1: 写 SCF 和 conversion 红灯测试**
+- [x] **Step 1: 写 SCF 和 conversion 红灯测试**
 
 覆盖 `scf.if` 两个 yield、`scf.for` init/block argument/yield/result，以及两个 consumer 需要不同 encoding 时在 consumer edge 前出现一次 conversion。
 
@@ -1802,11 +1804,11 @@ Run: `cmake --build build --target check-frisk --parallel 32`。
 
 Expected: FAIL，Tensor type 尚未被改写。
 
-- [ ] **Step 2: 实现非 region Op 的 type rewrite**
+- [x] **Step 2: 实现非 region Op 的 type rewrite**
 
 按 dominance order 克隆需要更改 result type 的 Op，使用 `IRMapping` 替换 operands/results；不得直接让 result type 与 Op verifier 暂时不一致。
 
-- [ ] **Step 3: 实现 SCF 一致重写**
+- [x] **Step 3: 实现 SCF 一致重写**
 
 固定规则：
 
@@ -1818,11 +1820,11 @@ scf.while: init == before args == after yield; condition args == after args == r
 
 若分支内部需要转换，在 yield 前插入；不得修改 join 后类型逃避 hard constraint。
 
-- [ ] **Step 4: 物化 solver 选中的 conversion edge**
+- [x] **Step 4: 物化 solver 选中的 conversion edge**
 
 只有 `LayoutSolution` 显式列出的 edge 才插入 `frisk.convert_layout`。source/target 相等时视为 solver/materializer bug 并失败；materializer 不重新比较成本。
 
-- [ ] **Step 5: 运行 materialization tests**
+- [x] **Step 5: 运行 materialization tests**
 
 Run:
 
@@ -1832,7 +1834,7 @@ cmake --build build --target FriskTransforms check-frisk --parallel 32
 
 Expected: Tensor/SCF/conversion tests PASS，`-verify-each` 无错误。
 
-- [ ] **Step 6: 提交 Distributed materialization**
+- [x] **Step 6: 提交 Distributed materialization**
 
 ```bash
 git add include/Dialect/Frisk/Transforms lib/Dialect/Frisk/Transforms test

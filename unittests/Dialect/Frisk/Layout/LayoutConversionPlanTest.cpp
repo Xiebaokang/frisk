@@ -122,6 +122,63 @@ TEST_F(ConversionPlanTest, NamedRegisterLaneSwapAndPermutation) {
   EXPECT_TRUE(witnessedWrongSelection);
 }
 
+TEST_F(ConversionPlanTest, InvertibleXorRowsUseIndependentOwnershipOracle) {
+  auto dst = type({2,32,1,1,1}, {"register","lane"}, {1,5}, {0,1,2,3,4,5});
+  auto encoding = cast<DistributedEncodingAttr>(dst.getEncoding());
+  auto map = cast<BitLinearLayoutMapAttr>(encoding.getMap());
+  SmallVector<APInt> entries(map.getMatrix().getValues<APInt>());
+  // y0 = register XOR lane[4], y1 = lane[0] XOR register; y2..5
+  // preserve lane[1..4]. Two elementary row additions give an invertible
+  // non-permutation matrix, independently checked below without GF2 helpers.
+  entries[5] = APInt(1, 1);
+  entries[6] = APInt(1, 1);
+  auto xorMap = BitLinearLayoutMapAttr::get(&context, map.getInputNames(),
+      map.getInputBitWidths(), map.getOutputNames(), map.getOutputBitWidths(),
+      DenseIntElementsAttr::get(map.getMatrix().getType(), entries));
+  auto xorEncoding = DistributedEncodingAttr::get(&context, xorMap,
+      encoding.getTopology(), encoding.getReplication());
+  auto src = RankedTensorType::get(dst.getShape(), dst.getElementType(), xorEncoding);
+  auto p = planRedistribution(src, dst, b.getUnknownLoc());
+  ASSERT_TRUE(succeeded(p));
+  EXPECT_EQ(p->mode, ExchangeMode::Shuffle);
+  oracle(src, dst, *p);
+  for (unsigned lane = 0; lane < 32; ++lane)
+    for (unsigned reg = 0; reg < 2; ++reg) {
+      Owner selected = p->destinations[lane * 2 + reg].source;
+      unsigned expectedRegister = reg ^ (lane >> 4);
+      EXPECT_EQ(selected.reg, expectedRegister);
+      EXPECT_EQ(selected.lane, (lane & ~1u) | ((lane & 1u) ^ expectedRegister));
+      EXPECT_EQ(selected.warp, 0u);
+      EXPECT_EQ(selected.warpGroup, 0u);
+    }
+}
+
+TEST_F(ConversionPlanTest, WarpGroupDecodingAcrossNamedInputOrders) {
+  auto src = type({1,32,2,2,1}, {"warp_group","lane","warp"}, {1,5,1},
+                  {1,2,3,4,5,6,0});
+  auto dst = type({1,32,2,2,1}, {"warp","warp_group","lane"}, {1,1,5},
+                  {1,3,4,5,6,0,2});
+  auto p = planRedistribution(src, dst, b.getUnknownLoc());
+  ASSERT_TRUE(succeeded(p));
+  EXPECT_EQ(p->mode, ExchangeMode::Shared);
+  EXPECT_EQ(p->threads, 128u);
+  EXPECT_EQ(p->scratchBytes, 512u);
+  oracle(src, dst, *p);
+  for (unsigned thread = 0; thread < 128; ++thread) {
+    Owner physical = p->owner(thread, 0);
+    EXPECT_EQ(physical.lane, thread % 32);
+    EXPECT_EQ(physical.warp, (thread / 32) % 2);
+    EXPECT_EQ(physical.warpGroup, thread / 64);
+    Owner selected = p->destinations[thread].source;
+    // Destination swaps lane[0] and warp_group[0], preserving warp[0].
+    EXPECT_EQ(selected.lane, (thread % 32 & ~1u) | (thread / 64));
+    EXPECT_EQ(selected.warp, (thread / 32) % 2);
+    EXPECT_EQ(selected.warpGroup, thread % 2);
+    EXPECT_EQ(p->thread(selected),
+              selected.warpGroup * 64 + selected.warp * 32 + selected.lane);
+  }
+}
+
 TEST_F(ConversionPlanTest, ReplicasPreferThreadThenWarp) {
   auto src = type({32,32,2,1,1}, {"register"}, {5}, {0,1,2,3,4});
   auto dst = type({1,32,2,1,1}, {"lane"}, {5}, {1,0,2,3,4});
