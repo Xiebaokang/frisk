@@ -1,4 +1,5 @@
 #include "Dialect/Frisk/Analysis/LayoutVerifier.h"
+#include "Dialect/Frisk/Analysis/LayoutRelations.h"
 
 #include <functional>
 
@@ -12,24 +13,13 @@ namespace mlir::frisk {
 
 namespace {
 
-bool candidatesCompatible(ConstraintKind kind, Attribute lhs, Attribute rhs) {
-  if (kind == ConstraintKind::StorageAccess) {
-    auto lhsStorage = dyn_cast<StorageLayoutAttr>(lhs);
-    auto rhsStorage = dyn_cast<StorageLayoutAttr>(rhs);
-    if (lhsStorage && rhsStorage)
-      return lhsStorage.getMap() == rhsStorage.getMap();
-  }
-  return lhs == rhs;
-}
-
 bool isSupportedBootstrapHardConstraint(ConstraintKind kind) {
   return kind == ConstraintKind::RequireEncoding ||
-         kind == ConstraintKind::SameLayout ||
-         kind == ConstraintKind::AliasLayout ||
-         kind == ConstraintKind::StorageAccess;
+         isSupportedLayoutRelation(kind);
 }
 
-bool satisfiesConstraint(const LayoutConstraint &constraint,
+bool satisfiesConstraint(const LayoutConstraintGraph &graph,
+                         const LayoutConstraint &constraint,
                          const DenseMap<LayoutVarID, Attribute> &assignment,
                          bool requireComplete) {
   if (constraint.strength != ConstraintStrength::Hard)
@@ -44,9 +34,9 @@ bool satisfiesConstraint(const LayoutConstraint &constraint,
   if (!isSupportedBootstrapHardConstraint(constraint.kind))
     return false;
   for (size_t index = 1; index < constraint.vars.size(); ++index)
-    if (!candidatesCompatible(
-            constraint.kind, assignment.lookup(constraint.vars.front()),
-            assignment.lookup(constraint.vars[index])))
+    if (!layoutRelationCompatible(graph, constraint,
+            constraint.vars.front(), assignment.lookup(constraint.vars.front()),
+            constraint.vars[index], assignment.lookup(constraint.vars[index])))
       return false;
   return true;
 }
@@ -167,24 +157,57 @@ solveBootstrapLayoutGraph(LayoutConstraintGraph &graph, LayoutTarget &,
       llvm::stable_sort(var.candidates,
                         [](const LayoutCandidate &lhs,
                            const LayoutCandidate &rhs) {
-        return lhs.stableOrdinal < rhs.stableOrdinal;
+        return std::make_pair(lhs.stableOrdinal, layoutCandidateKey(lhs.value)) <
+               std::make_pair(rhs.stableOrdinal, layoutCandidateKey(rhs.value));
       });
     }
 
     DenseMap<LayoutVarID, Attribute> trial = solution.assignments;
     bool found = false;
+    size_t bestConversions = std::numeric_limits<size_t>::max();
+    SmallVector<LayoutConversionEdge> bestEdges;
+    auto countConversions = [&]() {
+      SmallVector<LayoutConversionEdge> edges;
+      for (const LayoutConstraint &constraint : graph.getConstraints()) {
+        if (constraint.kind != ConstraintKind::Convertible ||
+            constraint.existingConversion ||
+            !llvm::is_contained(component, constraint.vars.front()))
+          continue;
+        Attribute source = trial.lookup(constraint.vars[0]);
+        Attribute target = trial.lookup(constraint.vars[1]);
+        if (!source || !target || layoutEncodingsEqual(source, target))
+          continue;
+        LayoutConversionEdge edge;
+        edge.use = constraint.use;
+        edge.sourceEncoding = source;
+        edge.targetEncoding = target;
+        edge.resolution = EdgeResolutionKind::Convert;
+        edge.constraint = constraint.id;
+        edges.push_back(edge);
+      }
+      llvm::sort(edges, [&](const auto &lhs, const auto &rhs) {
+        return graph.getConstraint(lhs.constraint).stableUseKey <
+               graph.getConstraint(rhs.constraint).stableUseKey;
+      });
+      return edges;
+    };
     std::function<void(size_t)> search = [&](size_t index) {
-      if (found)
-        return;
       if (index == component.size()) {
         if (llvm::all_of(graph.getConstraints(),
                          [&](const LayoutConstraint &constraint) {
-              return satisfiesConstraint(constraint, trial,
+              return satisfiesConstraint(graph, constraint, trial,
                                          /*requireComplete=*/false);
             })) {
-          found = true;
-          for (LayoutVarID id : component)
-            solution.assignments[id] = trial.lookup(id);
+          auto edges = countConversions();
+          // Stable DFS assignment order supplies the last tie-break. Do not
+          // stop at the first feasible assignment: conversion count comes first.
+          if (!found || edges.size() < bestConversions) {
+            found = true;
+            bestConversions = edges.size();
+            bestEdges = std::move(edges);
+            for (LayoutVarID id : component)
+              solution.assignments[id] = trial.lookup(id);
+          }
         }
         return;
       }
@@ -193,7 +216,7 @@ solveBootstrapLayoutGraph(LayoutConstraintGraph &graph, LayoutTarget &,
         trial[id] = candidate.value;
         bool viable = llvm::all_of(
             graph.getConstraints(), [&](const LayoutConstraint &constraint) {
-              return satisfiesConstraint(constraint, trial,
+              return satisfiesConstraint(graph, constraint, trial,
                                          /*requireComplete=*/false);
             });
         if (viable)
@@ -209,16 +232,35 @@ solveBootstrapLayoutGraph(LayoutConstraintGraph &graph, LayoutTarget &,
           << var.stableName;
       return failure();
     }
+    llvm::append_range(solution.conversions, bestEdges);
   }
+  llvm::sort(solution.conversions, [&](const auto &lhs, const auto &rhs) {
+    return graph.getConstraint(lhs.constraint).stableUseKey <
+           graph.getConstraint(rhs.constraint).stableUseKey;
+  });
   return solution;
 }
 
 LogicalResult verifySolvedLayoutGraph(const LayoutConstraintGraph &graph,
                                       const LayoutSolution &solution,
                                       LayoutTarget &target, Location loc) {
-  if (!solution.conversions.empty())
-    return emitError(loc)
-           << "bootstrap storage solver must not materialize conversions";
+  llvm::SmallDenseSet<LayoutConstraintID> converted;
+  for (const LayoutConversionEdge &edge : solution.conversions) {
+    if (edge.constraint >= graph.getConstraints().size())
+      return emitError(loc) << "conversion does not identify an authorized graph edge";
+    const auto &constraint = graph.getConstraint(edge.constraint);
+    if (constraint.kind != ConstraintKind::Convertible || constraint.existingConversion ||
+        !edge.use || constraint.use != edge.use ||
+        edge.resolution != EdgeResolutionKind::Convert ||
+        !converted.insert(edge.constraint).second ||
+        edge.sourceEncoding != solution.assignments.lookup(constraint.vars[0]) ||
+        edge.targetEncoding != solution.assignments.lookup(constraint.vars[1]) ||
+        layoutEncodingsEqual(edge.sourceEncoding, edge.targetEncoding))
+      return emitError(loc) << "invalid, duplicate, or identity conversion in layout solution";
+    const auto &source = graph.getVariable(constraint.vars[0]);
+    if (!source.value || edge.use->get() != source.value)
+      return emitError(loc) << "conversion SSA use no longer matches its producer";
+  }
   for (const LayoutVar &var : graph.getVariables()) {
     auto found = solution.assignments.find(var.id);
     if (found == solution.assignments.end())
@@ -237,7 +279,12 @@ LogicalResult verifySolvedLayoutGraph(const LayoutConstraintGraph &graph,
       return failure();
   }
   for (const LayoutConstraint &constraint : graph.getConstraints()) {
-    if (satisfiesConstraint(constraint, solution.assignments,
+    if (constraint.kind == ConstraintKind::Convertible && !constraint.existingConversion &&
+        !layoutEncodingsEqual(solution.assignments.lookup(constraint.vars[0]),
+                              solution.assignments.lookup(constraint.vars[1])) &&
+        !converted.count(constraint.id))
+      return emitError(loc) << "layout solution is missing a required consumer conversion";
+    if (satisfiesConstraint(graph, constraint, solution.assignments,
                             /*requireComplete=*/true))
       continue;
     const LayoutProvenance &provenance =

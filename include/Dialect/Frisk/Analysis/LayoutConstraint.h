@@ -17,6 +17,7 @@
 #include "mlir/IR/Location.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Types.h"
+#include "mlir/IR/Value.h"
 #include "mlir/Support/LogicalResult.h"
 
 namespace mlir::frisk {
@@ -31,6 +32,7 @@ enum class LayoutState { Uninitialized, CandidateSet, Resolved, Conflict };
 enum class ConstraintStrength { Hard, Soft };
 enum class ConstraintKind {
   SameLayout,
+  Convertible,
   TransformLayout,
   RequireEncoding,
   InstructionContract,
@@ -55,7 +57,12 @@ struct LayoutVar {
   LayoutState state = LayoutState::Uninitialized;
   std::string stableName;
   Operation *anchor = nullptr;
+  Value value;
+  OpOperand *use = nullptr;
+  std::optional<unsigned> functionResult;
 };
+
+enum class AccessKind { Read, Write };
 
 enum class EdgeResolutionKind { KeepCommonLayout, Convert, Rematerialize };
 
@@ -66,6 +73,7 @@ struct LayoutConversionEdge {
   EdgeResolutionKind resolution = EdgeResolutionKind::KeepCommonLayout;
   uint64_t bytes = 0;
   uint64_t synchronizationCost = 0;
+  LayoutConstraintID constraint = std::numeric_limits<LayoutConstraintID>::max();
 };
 
 struct LayoutProvenance {
@@ -83,6 +91,11 @@ struct LayoutConstraint {
   SmallVector<LayoutVarID> vars;
   Attribute requiredEncoding;
   ProvenanceID provenance = 0;
+  Attribute coordinateTransform;
+  AccessKind access = AccessKind::Read;
+  OpOperand *use = nullptr;
+  bool existingConversion = false;
+  std::string stableUseKey;
 };
 
 class LayoutConstraintGraph {
@@ -116,6 +129,7 @@ public:
     return constraints[id];
   }
   std::optional<LayoutVarID> lookupVariable(StringRef stableName) const;
+  std::optional<LayoutVarID> lookupVariable(Value value) const;
 
   void print(raw_ostream &os) const;
 

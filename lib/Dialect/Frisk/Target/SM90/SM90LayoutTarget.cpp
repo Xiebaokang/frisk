@@ -11,6 +11,9 @@
 
 namespace mlir::frisk {
 
+void enumerateSM90DistributedCandidates(
+    const LayoutVar &var, SmallVectorImpl<LayoutCandidate> &out);
+
 namespace {
 
 ArrayAttr getDimensionNames(Builder &builder, unsigned rank) {
@@ -161,6 +164,10 @@ public:
   void enumerateCandidates(
       const LayoutVar &var,
       SmallVectorImpl<LayoutCandidate> &out) const override {
+    if (var.kind == LayoutKind::Distributed) {
+      enumerateSM90DistributedCandidates(var, out);
+      return;
+    }
     auto type = dyn_cast<MemRefType>(var.shapedType);
     if (var.kind != LayoutKind::Storage || !type || !type.hasStaticShape() ||
         !type.getElementType().isIntOrFloat())
@@ -183,6 +190,15 @@ public:
 
   LogicalResult verifyCandidate(const LayoutVar &var, Attribute candidate,
                                 Location loc) const override {
+    if (var.kind == LayoutKind::Distributed) {
+      auto tensor = dyn_cast<RankedTensorType>(var.shapedType);
+      auto encoding = dyn_cast<DistributedEncodingAttr>(candidate);
+      if (!tensor || !encoding)
+        return emitError(loc) << "SM90 distributed candidate has incompatible kind";
+      if (encoding.getTopology()[4] != 1)
+        return emitError(loc) << "SM90 bootstrap distributed candidate requires a single CTA";
+      return encoding.verifyForType(tensor, loc);
+    }
     auto type = dyn_cast<MemRefType>(var.shapedType);
     auto storage = dyn_cast<StorageLayoutAttr>(candidate);
     if (var.kind != LayoutKind::Storage || !type || !storage)

@@ -25,6 +25,12 @@ LogicalResult materializeLayouts(Operation *,
                                  const LayoutConstraintGraph &graph,
                                  const LayoutSolution &solution) {
   for (const LayoutVar &var : graph.getVariables()) {
+    if (var.kind == LayoutKind::Distributed)
+      return emitError(var.anchor ? var.anchor->getLoc() :
+                       UnknownLoc::get(var.shapedType.getContext()))
+             << "distributed tensor materialization is not implemented; use analysis-only";
+  }
+  for (const LayoutVar &var : graph.getVariables()) {
     if (!var.anchor)
       continue;
     auto view = dyn_cast<LayoutViewOp>(var.anchor);
