@@ -50,6 +50,30 @@ The approved scope is Tasks 14–17 in `layout_inference_implementation_plan.md`
   integration fixture, and clarification that split-input-file is optional.
   Follow-up gate: 27 lit, 74 unit and 4 CTest; the live 2x2 transpose retains
   exactly one conversion and byte-identical inference/cleanup replay.
-- [ ] Final review and M3 Gate.
+- [x] Final review and M3 Gate.
+  Whole-branch review of `f65c54d..87408c9` approved, no Critical/Important or
+  new actionable Minor findings. Parent independently rebuilt the relevant
+  targets and verified 27 lit, 74 unit and 4 CTest cases, the original unsplit
+  M3 command, and byte-identical infer/cleanup replay; all exited 0.
+
+## Final verification and handoff
+
+```bash
+cmake --build build --target FriskTransforms FriskLayoutToGPU check-frisk \
+  FriskLayoutUnitTests frisk_attr_test frisk_reduce_layout_test \
+  frisk_layout_pass_test frisk_memory_effect_test --parallel 32
+build/unittests/Dialect/Frisk/FriskLayoutUnitTests
+ctest --test-dir build --output-on-failure
+build/bin/frisk-opt test/Transforms/multi-consumer-layout.mlir \
+  -frisk-infer-layouts -frisk-optimize-layout-conversions -verify-each
+git diff f65c54d..HEAD --check
+```
+
+The implementation remains in the local `feature/m3-distributed-layout` branch
+at `/home/baopeihua/frisk/.worktrees/m3-distributed-layout`; the main worktree is
+unchanged at `f65c54d`. M4 begins with Task 18; formal CostVector and executable
+GPU/runtime gates remain M5/M6. Pre-existing negative-unit diagnostic output
+and CMake CMP0116 configuration noise are nonblocking maintenance items, not
+test failures or M3 regressions.
 
 No M3 integration into main or remote publication has been performed.

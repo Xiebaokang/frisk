@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++17、LLVM/MLIR ODS/TableGen、MLIR Pass/Dialect Conversion、Affine/Presburger、SCF、MemRef、Tensor、GPU/NVGPU/NVVM、LLVM ADT/APInt、CMake/Ninja、llvm-lit/FileCheck、CTest、CUDA/Nsight 性能工具。
 
-> **执行状态（2026-09-10）：M0–M2 已完成；M3 Task 14–17 已实现并通过逐任务审查及功能 Gate，整分支最终审查进行中。下一实施里程碑为 M4（Task 18）。**
+> **执行状态（2026-09-10）：M0–M3 已完成并通过 Gate；M3 逐任务及整分支审查通过。下一未完成里程碑为 M4（Task 18）。**
 
 ## Global Constraints
 
@@ -1911,6 +1911,10 @@ git commit -m "feat: optimize and test-lower layout conversions"
 ```
 
 ### M3 Gate
+
+状态：通过（2026-09-10）。27 lit、74 unit、4 CTest 全部通过；活跃 2x2 transpose
+consumer 保留恰好一个选定 conversion，重复 infer/cleanup 输出逐字一致。
+详细范围、命令和限制见 [M3 execution notes](m3_execution_notes.md)。
 
 Run:
 

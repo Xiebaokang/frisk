@@ -4,7 +4,7 @@
 > 日期：2026-08-16
 > 范围：NVIDIA SM90/SM90a；布局推断、布局验证与布局物化
 > 核心选择：Local/Register Tile 使用 `RankedTensorType + EncodingAttr`，Shared/Global 保持 MemRef，由统一约束系统连接分布式布局与存储布局
-> 实施状态（2026-09-10）：M0–M2 已完成；M3 Task 14–17 已实现、通过逐任务审查和功能 Gate，整分支最终审查进行中。Storage 与 Distributed Tensor 均形成 collect → solve → materialize → verify 闭环，conversion 支持静态单 CTA 测试降低；可执行 GPU 运行验收仍属 M6。
+> 实施状态（2026-09-10）：M0–M3 已完成并通过 Gate、逐任务及整分支审查。Storage 与 Distributed Tensor 均形成 collect → solve → materialize → verify 闭环，conversion 支持静态单 CTA 测试降低；下一阶段为 M4，可执行 GPU 运行验收仍属 M6。
 
 ## 1. 结论先行
 
@@ -916,6 +916,10 @@ NVIDIA 对 compute capability 9 的 TMA swizzle 给出了 32B/64B/128B 模式及
 验收：linear、transpose、padding、shared XOR swizzle 可从输入 IR 推断并物化；alias 冲突输出来源和坐标反例。
 
 ### M3：Distributed Tensor 与 conversion 纵向切片
+
+状态：已完成（2026-09-10）。27 个 lit、74 个 unit、4 个 CTest 及活跃多 consumer
+推断/清理的逐字一致 replay 通过；逐任务和整分支审查均通过。测试 adapter 的
+Tensor/vector 桥接仍需 M6 可执行 lowering 接管，不代表 GPU runtime 验收完成。
 
 工作：
 
