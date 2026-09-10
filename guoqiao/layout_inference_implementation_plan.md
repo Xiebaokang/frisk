@@ -1862,21 +1862,21 @@ std::unique_ptr<Pass> createOptimizeLayoutConversionsPass();
 std::unique_ptr<Pass> createTestLowerLayoutConversionsPass();
 ```
 
-测试 lowering 仅支持静态、单 CTA、BitLinear→BitLinear redistribution：warp 内优先用 shuffle，跨 warp 使用 workgroup scratch + barrier exchange。动态 carrier、跨 CTA 和需要 cluster 通信的 conversion 明确报 unsupported。
+已实现。详细 adapter 边界和 M6 Tensor↔thread-vector 桥接职责见 [Task 17 implementation](m3_task17_conversions.md)。测试 lowering 仅支持静态、单 CTA、BitLinear→BitLinear redistribution：同线程优先 register extraction，同 warp 优先 shuffle，跨 warp 使用真实 workgroup attribution + barrier exchange。两端 execution topology 必须匹配，lane=32，gpu.func 单 entry block 且 known_block_size 匹配；不支持的 scope/topology/dtype 明确诊断。
 
-- [ ] **Step 1: 写 cleanup/lowering 红灯测试**
+- [x] **Step 1: 写 cleanup/lowering 红灯测试**
 
-覆盖 identity、A→B→A、相邻 A→B→C 合并，一个 lane permutation conversion 产生 `gpu.shuffle`，以及一个跨 warp permutation 产生 workgroup scratch store/barrier/load。动态 carrier 预期诊断 `test lowering requires a static single-CTA redistribution`。
+覆盖 identity、A→B→A、相邻 A→B→C 合并，一个 lane permutation conversion 产生 `gpu.shuffle`，以及一个跨 warp permutation 产生 workgroup scratch store/barrier/load。动态 encoded tensor 在正常 IR 路径由 M1 verifier 先拒绝；programmatic planner negative 单独验证动态输入。可到达测试 adapter 的 unsupported 情况使用 `test lowering requires a static single-CTA redistribution` 前缀，未禁用 verifier。
 
 Run: `cmake --build build --target check-frisk --parallel 32`。
 
 Expected: FAIL，passes 尚不存在。
 
-- [ ] **Step 2: 实现 type-safe cleanup patterns**
+- [x] **Step 2: 实现 type-safe cleanup patterns**
 
 只实现数学上可证明的：identity elimination、相邻 conversion compose、inverse pair elimination。Pattern 必须调用 canonical map equality，不比较 Attr 指针。
 
-- [ ] **Step 3: 实现单 warp redistribution 计划**
+- [x] **Step 3: 实现单 warp redistribution 计划**
 
 计算：
 
@@ -1884,23 +1884,23 @@ Expected: FAIL，passes 尚不存在。
 R = rightInverse(D_src) compose D_dst
 ```
 
-对每个目标 carrier 得到 source lane/register；若 source 不覆盖目标 logical element，lowering 失败。生成 `gpu.shuffle` 前验证所有 lane index 在 `[0, 31]`。
+按 named input 解码每个目标 carrier 对应的 source lane/register，并验证 source coverage/bounds；replica 优先同 thread/warp。所有 source-register candidate shuffle 均在全 warp 无条件执行，之后按 destination 请求选择 register。i8/i16/i32/i64/f16/bf16/f32/f64 经 bit-preserving i32 words 传输；64-bit 拆分/重组。
 
-- [ ] **Step 4: 实现单 CTA shared exchange**
+- [x] **Step 4: 实现单 CTA shared exchange**
 
-先用 canonical maps 为每个 live logical element证明唯一 source owner 和所有 destination owners，再以 logical linear index 分配 scratch slot：source owner 写入，执行一次 `gpu.barrier`，destination owner 读取。scratch 字节数按 element bit width、tile volume 和 alignment 精确计算；sub-byte 暂不支持。若存在缺失 source、重复 writer、越界 slot 或 scratch 超过 target limit，lowering 必须失败并打印首个 logical coordinate 反例。
+先用 canonical maps 为每个 live logical element证明唯一 source owner 和所有 destination owners，再以 logical linear index 分配 scratch slot：source owner 写入，执行一次 `gpu.barrier`，destination owner 读取。scratch 字节数按 element bit width、tile volume 和 alignment 精确计算；sub-byte 暂不支持。global writer election 与 local replica preference 分离。缺失 source/writer/slot proof 失败报告 logical coordinate；容量/类型限制给出具体原因。默认 49152-byte adapter budget（非 SM90 最大值）计入原 dtype byte size、既有 attribution、padding 和全部新增 scratch；dynamic/non-attributed workgroup storage 拒绝。
 
-- [ ] **Step 5: 注册 passes 并运行测试**
+- [x] **Step 5: 注册 passes 并运行测试**
 
 Run:
 
 ```bash
-cmake --build build --target FriskTransforms check-frisk --parallel 32
+cmake --build build --target FriskTransforms FriskLayoutToGPU FriskLayoutUnitTests check-frisk --parallel 32
 ```
 
 Expected: cleanup、single-warp 和 shared-exchange FileCheck PASS；unsupported case 使用预期诊断失败；生成 IR 通过 `-verify-each`。
 
-- [ ] **Step 6: 提交 conversion MVP**
+- [x] **Step 6: 提交 conversion MVP**
 
 ```bash
 git add include/Dialect/Frisk/Transforms lib/Conversion \
@@ -1915,7 +1915,7 @@ Run:
 ```bash
 cmake --build build --target check-frisk FriskLayoutUnitTests --parallel 32
 build/bin/frisk-opt test/Transforms/multi-consumer-layout.mlir \
-  -frisk-infer-layouts -frisk-optimize-layout-conversions -verify-each
+  --split-input-file -frisk-infer-layouts -frisk-optimize-layout-conversions -verify-each
 ```
 
 Expected: 多 consumer IR 合法；共同布局或 conversion 由 solution 明确决定；SCF 类型一致；单 warp 与单 CTA shared-exchange conversion 可以 lower，非支持路径明确失败。

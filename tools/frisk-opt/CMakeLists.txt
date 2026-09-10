@@ -24,4 +24,5 @@ target_link_libraries(frisk-opt
   MLIRIR
   FriskIR
   FriskTransforms
+  FriskLayoutToGPU
 )

@@ -2,6 +2,7 @@ add_frisk_library(FriskTransforms
     LayoutInfer.cpp
     MaterializeLayouts.cpp
     LayoutTypeConverter.cpp
+    OptimizeLayoutConversions.cpp
 
     DEPENDS FriskTransformsIncGen
 
@@ -10,6 +11,7 @@ add_frisk_library(FriskTransforms
     MLIRIR
     MLIRPass
     MLIRTransformUtils
+    MLIRTransforms
     FriskLayoutAnalysis
     FriskIR
     FriskSM90LayoutTarget

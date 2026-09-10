@@ -10,6 +10,8 @@ namespace mlir::frisk {
 #include "Dialect/Frisk/Transforms/Passes.h.inc"
 
 std::unique_ptr<Pass> createFriskInferLayoutsPass();
+std::unique_ptr<Pass> createOptimizeLayoutConversionsPass();
+std::unique_ptr<Pass> createTestLowerLayoutConversionsPass();
 
 #define GEN_PASS_REGISTRATION
 #include "Dialect/Frisk/Transforms/Passes.h.inc"

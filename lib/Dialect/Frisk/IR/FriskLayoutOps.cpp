@@ -158,19 +158,25 @@ LogicalResult ConvertLayoutOp::canonicalize(ConvertLayoutOp op,
                                             PatternRewriter &rewriter) {
   auto sourceType = cast<RankedTensorType>(op.getSource().getType());
   auto resultType = cast<RankedTensorType>(op.getResult().getType());
-  if (sourceType == resultType) {
+  if (sourceType == resultType &&
+      haveEquivalentDistributedEncodings(sourceType, resultType)) {
     rewriter.replaceOp(op, op.getSource());
     return success();
   }
 
   auto inner = op.getSource().getDefiningOp<ConvertLayoutOp>();
-  if (!inner || inner.getSource().getType() != op.getResult().getType())
+  if (!inner)
     return failure();
   auto innerSourceType =
       cast<RankedTensorType>(inner.getSource().getType());
-  if (!haveEquivalentDistributedEncodings(innerSourceType, resultType))
-    return failure();
-  rewriter.replaceOp(op, inner.getSource());
+  if (innerSourceType == resultType &&
+      haveEquivalentDistributedEncodings(innerSourceType, resultType)) {
+    rewriter.replaceOp(op, inner.getSource());
+    return success();
+  }
+  // Composition preserves the exact requested result type. A semantic map
+  // identity with distinct attribute spelling is not an SSA type identity.
+  rewriter.replaceOpWithNewOp<ConvertLayoutOp>(op, resultType, inner.getSource());
   return success();
 }
 

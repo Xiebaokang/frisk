@@ -1,4 +1,5 @@
 add_unittest(FriskUnitTests FriskLayoutUnitTests
+  LayoutConversionPlanTest.cpp
   BitLinearLayoutTest.cpp
   GF2MatrixTest.cpp
   LayoutEncodingTest.cpp
@@ -18,6 +19,8 @@ set_target_properties(FriskLayoutUnitTests PROPERTIES
 
 target_link_libraries(FriskLayoutUnitTests
   PRIVATE
+  FriskLayoutToGPU
+  FriskTransforms
   FriskAnalysis
   FriskIR
   FriskLayoutAnalysis

@@ -15,4 +15,16 @@ def FriskInferLayouts : Pass<"frisk-infer-layouts", "::mlir::ModuleOp"> {
   ];
 }
 
+def OptimizeLayoutConversions : Pass<"frisk-optimize-layout-conversions", "::mlir::ModuleOp"> {
+  let summary = "Fold and compose type-safe distributed layout conversions";
+  let constructor = "mlir::frisk::createOptimizeLayoutConversionsPass()";
+}
+
+def TestLowerLayoutConversions : Pass<"frisk-test-lower-layout-conversions", "::mlir::ModuleOp"> {
+  let summary = "Test-only static single-CTA layout redistribution adapter";
+  let constructor = "mlir::frisk::createTestLowerLayoutConversionsPass()";
+  let options = [Option<"scratchBudget", "scratch-budget", "uint64_t", "49152",
+    "Conservative adapter workgroup byte budget (not the SM90 maximum)">];
+}
+
 #endif // FRISK_PASSES

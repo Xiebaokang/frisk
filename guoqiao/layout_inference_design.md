@@ -1089,5 +1089,47 @@ Distributed SSA/use graph、双向 transpose relation、候选闭包后单调裁
   staged `RelationsOnly` 验证将 consumer 固定为实际 operand encoding，不重新求解。
   详细契约见 [M3 Task 16 materialization](m3_task16_materialization.md)。当前未知
   tensor op、tensor call、external tensor signature 明确失败，不宣称完整 Distributed lowering。
-- Conversion analysis 限 single CTA；Task 17 的测试 lowering 必须明确诊断其
-  无法支持的 execution-topology 组合。性能优化和 GPU 验收仍属于后续里程碑。
+- Conversion analysis 限 single CTA；Task 17 的测试 lowering 对不支持的
+  execution-topology 组合明确诊断，不将 Convertible 当作可执行性证明。
+
+## 18. M3 Task 17 conversion cleanup 与测试 adapter
+
+`frisk-optimize-layout-conversions` 已实现 canonical map 检查下的 identity/
+inverse elimination，以及 A→B→C 合并。所有 replacement 必须保持 exact SSA
+result type；即使 canonical map 相同，encoding attribute 不同也不能直接
+替换 SSA value。多 consumer 的中间 conversion 保留其其他用途。
+
+`frisk-test-lower-layout-conversions` 是测试专用的静态 BitLinear adapter：
+
+- 共享 planner 计算 `R = rightInverse(Dsrc) compose Ddst` 并逐 owner 验证。
+  按 named input 独立编解码 register/lane/warp/warp_group；缺失 input 维度
+  视为 replication。逻辑坐标按 tensor row-major 分配 scratch，不直接使用
+  concatenated matrix bits 作为多维线性地址。
+- source owner 优先 same-thread、其次 same-warp replica，物理 thread/register
+  字典序打破平局；无本地 replica 时使用已证明的 R owner。Shared writer 是
+  独立的每 logical element 唯一 global right-inverse owner，不按各 consumer
+  的 local replica 选择重复写入。单线程 register permutation 不生成 shuffle。
+- Shuffle 对每个候选 source register 在全部 lane 无条件执行，再根据目标
+  lane 的 source-register 请求选择。i8/i16/i32/i64、f16/bf16/f32/f64 均通过
+  bit-preserving i32 word 传输；窄类型 zero-extend/truncate，64-bit 拆两 word
+  后重组，float 只 bitcast，不做数值转换。
+- 跨 warp 使用 gpu.func workgroup attribution、唯一 owner 条件 store、
+  无条件 gpu.barrier、每 destination logical slot load；使用原 dtype、自然
+  alignment、独立 buffer。默认 49152-byte **adapter budget** 可配置，不代表
+  SM90 硬件最大值。计入既有 attribution、buffer 间 padding 和全部新增 buffer；
+  dynamic/non-attributed workgroup storage 明确拒绝，避免未计入的共享容量。
+- 仅接受 single-block gpu.func kernel 的直接 entry-block conversion，要求
+  已知 `[32*warp*warp_group,1,1]` block size、lane=32、CTA=1、两端 execution
+  topology 相同（register extent 可不同）。拒绝 nested if/loop、CFG、缺失
+  block metadata、跨 CTA/cluster、unsupported dtype 和 adapter 大小上限。
+  单 CTA 是每 tile 的通信范围，不限制不同 block 独立执行同一 kernel。
+- 所有计划/容量检查先于 IR mutation；失败不改变 module。公开 representation
+  仍为 encoded RankedTensor。内部 `unrealized_conversion_cast` 的 Tensor↔
+  per-thread Vector 桥接只定义测试 ABI；M6 runtime harness 必须以真实 tile
+  load/store transport 替换并消除这些桥接，才能进入可执行 GPU lowering。
+
+M3 只验收 ownership/payload oracle、合法 GPU-level IR 和明确 unsupported
+diagnostics，不宣称已完成 GPU runtime correctness 或性能验证。动态 encoded
+tensor 和缺 coverage map 已被 M1 verifier 先拒绝；planner 的 programmatic
+negative tests 独立覆盖其拒绝边界。详细接口及命令见
+[Task 17 implementation](m3_task17_conversions.md)。
