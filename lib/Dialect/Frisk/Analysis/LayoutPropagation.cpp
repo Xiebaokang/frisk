@@ -334,7 +334,8 @@ LayoutConstraintBuilder::lookup(Value value, LayoutKind kind) const {
 }
 
 FailureOr<LayoutConstraintGraph>
-collectLayoutConstraints(Operation *root, LayoutTarget &target) {
+collectLayoutConstraints(Operation *root, LayoutTarget &target,
+                         LayoutCollectionMode mode) {
   LayoutConstraintGraph graph;
   LayoutConstraintBuilder builder(graph);
   DenseMap<Value, SmallVector<LayoutVarID>> viewsBySource;
@@ -418,6 +419,8 @@ collectLayoutConstraints(Operation *root, LayoutTarget &target) {
     return failure();
   if (failed(graph.finalize(root->getLoc())))
     return failure();
+  if (mode == LayoutCollectionMode::RelationsOnly)
+    return graph;
 
   auto projectCandidatesToFixedPoint = [&]() {
     bool addedCandidate;

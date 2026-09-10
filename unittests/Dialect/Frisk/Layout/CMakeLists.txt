@@ -7,6 +7,7 @@ add_unittest(FriskUnitTests FriskLayoutUnitTests
   LayoutPropagationTest.cpp
   DistributedPropagationTest.cpp
   LayoutVerifierTest.cpp
+  LayoutMaterializationTest.cpp
   LegacyLayoutAdapterTest.cpp
   ProductLayoutTest.cpp
 )
@@ -22,10 +23,12 @@ target_link_libraries(FriskLayoutUnitTests
   FriskLayoutAnalysis
   FriskSM90LayoutTarget
   FriskLegacyLayoutAdapter
+  FriskTransforms
   MLIRFuncDialect
   MLIRArithDialect
   MLIRLinalgDialect
   MLIRTensorDialect
+  MLIRSCFDialect
   MLIRIR
   MLIRParser
 )

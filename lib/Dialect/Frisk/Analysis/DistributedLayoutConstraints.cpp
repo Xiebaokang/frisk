@@ -2,6 +2,7 @@
 #include "Dialect/Frisk/IR/FriskOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Matchers.h"
 #include "llvm/Support/MathExtras.h"
@@ -103,6 +104,60 @@ LogicalResult collectDistributedLayoutConstraints(
       for (OpOperand &use : op->getOpOperands())
         if (isa<RankedTensorType>(use.get().getType()))
           (void)connectUse(use, it->second[use.getOperandNumber()]);
+      return WalkResult::advance();
+    }
+    if (isa<scf::IfOp>(op)) {
+      // Yield uses are connected below, directly to each result join slot.
+      return WalkResult::advance();
+    }
+    if (auto loop = dyn_cast<scf::ForOp>(op)) {
+      for (auto [index, arg] : llvm::enumerate(loop.getRegionIterArgs())) {
+        if (!isa<RankedTensorType>(arg.getType())) continue;
+        auto slot = builder.getOrCreateDistributedVar(arg);
+        (void)builder.same(slot, builder.getOrCreateDistributedVar(loop.getResult(index)),
+                           op, "for-carried-slot");
+        (void)connectUse(loop.getInitsMutable()[index], slot);
+      }
+      return WalkResult::advance();
+    }
+    if (auto loop = dyn_cast<scf::WhileOp>(op)) {
+      // The input/before/yield tuple and condition/after/result tuple can
+      // have different arities and types. Do not tie unrelated tuple slots.
+      for (auto [index, arg] : llvm::enumerate(loop.getBeforeArguments()))
+        if (isa<RankedTensorType>(arg.getType()))
+          (void)connectUse(op->getOpOperand(index),
+                           builder.getOrCreateDistributedVar(arg));
+      for (auto [index, arg] : llvm::enumerate(loop.getAfterArguments()))
+        if (isa<RankedTensorType>(arg.getType()))
+          (void)builder.same(builder.getOrCreateDistributedVar(arg),
+              builder.getOrCreateDistributedVar(loop.getResult(index)), op,
+              "while-result-slot");
+      return WalkResult::advance();
+    }
+    if (auto yield = dyn_cast<scf::YieldOp>(op)) {
+      Operation *parent = op->getParentOp();
+      for (OpOperand &use : op->getOpOperands()) {
+        if (!isa<RankedTensorType>(use.get().getType())) continue;
+        unsigned index = use.getOperandNumber();
+        Value expected;
+        if (isa<scf::IfOp, scf::ForOp>(parent))
+          expected = parent->getResult(index);
+        else if (auto loop = dyn_cast<scf::WhileOp>(parent))
+          expected = loop.getBeforeArguments()[index];
+        else {
+          op->emitError("operation has no layout constraint model for tensor yield");
+          return WalkResult::interrupt();
+        }
+        (void)connectUse(use, builder.getOrCreateDistributedVar(expected));
+      }
+      return WalkResult::advance();
+    }
+    if (auto condition = dyn_cast<scf::ConditionOp>(op)) {
+      auto loop = cast<scf::WhileOp>(op->getParentOp());
+      for (OpOperand &use : op->getOpOperands().drop_front())
+        if (isa<RankedTensorType>(use.get().getType()))
+          (void)connectUse(use, builder.getOrCreateDistributedVar(
+              loop.getResult(use.getOperandNumber() - 1)));
       return WalkResult::advance();
     }
     if (auto load = dyn_cast<TileLoadOp>(op)) {

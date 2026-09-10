@@ -44,10 +44,13 @@ private:
   uint64_t nextStableOrdinal = 0;
 };
 
-FailureOr<LayoutConstraintGraph>
-collectLayoutConstraints(Operation *root, LayoutTarget &target);
+enum class LayoutCollectionMode { InitializeCandidates, RelationsOnly };
 
-/// Extends the graph before finalization; SCF tensor models are Task 16.
+FailureOr<LayoutConstraintGraph> collectLayoutConstraints(
+    Operation *root, LayoutTarget &target,
+    LayoutCollectionMode mode = LayoutCollectionMode::InitializeCandidates);
+
+/// Extends the graph before finalization, including structured Tensor joins.
 LogicalResult collectDistributedLayoutConstraints(
     Operation *root, LayoutConstraintGraph &graph, LayoutConstraintBuilder &builder);
 

@@ -3,8 +3,9 @@
 Task 15 implements analysis and edge selection; Task 16 owns tensor/SCF
 materialization. `--frisk-infer-layouts=analysis-only` collects, propagates,
 solves and verifies without changing IR. `dump-analysis` prints deterministic
-graph IDs, domain sizes and selected consumer-use keys. Without analysis-only,
-distributed materialization currently fails explicitly before changing IR.
+graph IDs, domain sizes and selected consumer-use keys. Task 16 now implements
+transactional distributed/SCF materialization for normal inference; see
+`m3_task16_materialization.md`. The analysis-only path remains read-only.
 
 ## Implemented checklist
 
@@ -29,7 +30,7 @@ distributed materialization currently fails explicitly before changing IR.
   zero conversions. Independently encoded transpose-DPS consumer uses one.
 - [x] Forward/reverse non-square transpose, stable reordered solutions,
   conversion-count ordering, hard limits and tampered-solution regressions.
-- [ ] SCF if/for/while graph collection and coupled type rebuilding: Task 16.
+- [x] SCF if/for/while graph collection and coupled type rebuilding: Task 16.
 
 ## Representation and semantic boundaries
 
@@ -42,8 +43,9 @@ consumer edge targets it directly to conserve the 8-variable budget.
 
 `LayoutConversionEdge::constraint` refers to the finalized graph constraint;
 that constraint provides `stableUseKey` and the original `OpOperand *`.
-Task 16 must snapshot owning operation/operand index before replacing IR and
-remap those bindings; it must not dereference erased operand pointers.
+Task 16 snapshots owning operation/operand index before replacing IR and
+remaps those bindings; graph/solution pointers must not be dereferenced after
+the successful body-transfer commit.
 
 All relation users share `LayoutRelations.cpp`. SameLayout/Keep preserve exact
 encoding equality, including named map metadata, so equal-layout reasoning
@@ -80,8 +82,8 @@ combinations it cannot implement, rather than silently mislowering them.
 
 Extend `collectDistributedLayoutConstraints` before graph finalization. The
 builder exposes `convertible(src, expected, use, existing=false)`,
-`getOrCreateDistributedUse`, `transform`, and `storageAccess`. SCF tensor ops
-currently receive the explicit unknown-model diagnostic.
+`getOrCreateDistributedUse`, `transform`, and `storageAccess`. Task 16 adds
+the SCF tensor models using those interfaces.
 
 For for/if slots, connect init/yield uses to existing expected result/argument
 variables where possible instead of creating redundant equality-only nodes.
@@ -92,5 +94,5 @@ dense tensor constant attributes must be retyped with their result type.
 Preserve explicit encodings and reject unsupported tensor calls rather than
 changing unmodeled ABI uses.
 
-After Task 16 implements materialization, replace the current preflight guard;
-retain analysis-only as a read-only diagnostic/testing interface.
+Task 16 replaces the temporary materialization guard and retains analysis-only
+as a read-only diagnostic/testing interface.

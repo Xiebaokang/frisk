@@ -29,5 +29,6 @@ add_frisk_library(FriskLayoutAnalysis
   MLIRIR
   MLIRFuncDialect
   MLIRLinalgDialect
+  MLIRSCFDialect
   MLIRTensorDialect
 )

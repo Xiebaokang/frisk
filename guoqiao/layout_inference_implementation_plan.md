@@ -1758,6 +1758,9 @@ git commit -m "feat: propagate distributed layout constraints"
 
 ### Task 16: 物化 Tensor encoding、SCF 类型和 conversion edge
 
+实现与验证记录见 [m3_task16_materialization.md](m3_task16_materialization.md)；
+其中以实际 MLIR 的双 tuple 规则修正下方原始 SCF while 简写。
+
 **Files:**
 
 - Modify: `lib/Dialect/Frisk/Transforms/MaterializeLayouts.cpp`
@@ -1810,7 +1813,7 @@ Expected: FAIL，Tensor type 尚未被改写。
 ```text
 scf.if: each yield operand encoding == corresponding result encoding
 scf.for: init == iter_arg == yield == result
-scf.while: before args == condition args == after args == results
+scf.while: init == before args == after yield; condition args == after args == results
 ```
 
 若分支内部需要转换，在 yield 前插入；不得修改 join 后类型逃避 hard constraint。
