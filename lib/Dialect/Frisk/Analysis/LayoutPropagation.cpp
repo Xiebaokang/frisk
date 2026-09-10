@@ -235,25 +235,28 @@ LayoutConstraintBuilder::getOrCreateDistributedVar(Value value) {
   return getOrCreate(value, LayoutKind::Distributed);
 }
 
-LayoutVarID LayoutConstraintBuilder::getOrCreateDistributedUse(OpOperand &use) {
-  auto found = distributedVariablesByUse.find(&use);
-  if (found != distributedVariablesByUse.end())
-    return found->second;
-  LayoutVarID src = getOrCreateDistributedVar(use.get());
-  // Owner operation paths use an existing operand's stable value path plus
-  // block/operation ordinals, independent of use-list insertion order.
+static std::string getStableUseKey(OpOperand &use) {
+  // Stable owner block/operation ordinals and operand slot, never use-list order.
   Operation *owner = use.getOwner();
   unsigned ordinal = 0;
   for (Operation &op : *owner->getBlock()) {
     if (&op == owner) break;
     ++ordinal;
   }
-  std::string key = getQualifiedSymbolName(owner) + "/b" +
+  return getQualifiedSymbolName(owner) + "/b" +
       std::to_string(getBlockOrdinal(findEnclosingSymbol(owner), owner->getBlock())) +
       "/o" + std::to_string(ordinal) + "/use" +
       std::to_string(use.getOperandNumber());
+}
+
+LayoutVarID LayoutConstraintBuilder::getOrCreateDistributedUse(OpOperand &use) {
+  auto found = distributedVariablesByUse.find(&use);
+  if (found != distributedVariablesByUse.end())
+    return found->second;
+  LayoutVarID src = getOrCreateDistributedVar(use.get());
+  std::string key = getStableUseKey(use);
   LayoutVarID dst = graph.addVariable(LayoutKind::Distributed, use.get().getType(),
-                                      key, owner);
+                                      key, use.getOwner());
   graph.getVariable(dst).use = &use;
   distributedVariablesByUse[&use] = dst;
   (void)convertible(src, dst, use);
@@ -268,16 +271,7 @@ LogicalResult LayoutConstraintBuilder::convertible(
   auto &constraint = graph.getConstraints()[id];
   constraint.use = &use;
   constraint.existingConversion = existing;
-  Operation *owner = use.getOwner();
-  unsigned ordinal = 0;
-  for (Operation &op : *owner->getBlock()) {
-    if (&op == owner) break;
-    ++ordinal;
-  }
-  constraint.stableUseKey = getQualifiedSymbolName(owner) + "/b" +
-      std::to_string(getBlockOrdinal(findEnclosingSymbol(owner), owner->getBlock())) +
-      "/o" + std::to_string(ordinal) + "/use" +
-      std::to_string(use.getOperandNumber());
+  constraint.stableUseKey = getStableUseKey(use);
   return success();
 }
 

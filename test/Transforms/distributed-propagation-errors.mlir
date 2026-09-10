@@ -36,3 +36,8 @@ func.func @chain(%arg: tensor<8xf32>) {
   return
 }
 // expected-error@-11 {{bootstrap layout solver limit exceeded}}
+
+// -----
+
+// expected-error@+1 {{distributed inference requires nonzero-rank tensor tiles}}
+func.func @rank_zero(%arg: tensor<f32>) { return }

@@ -7,7 +7,8 @@ namespace mlir::frisk {
 void enumerateSM90DistributedCandidates(
     const LayoutVar &var, SmallVectorImpl<LayoutCandidate> &out) {
   auto type = dyn_cast<RankedTensorType>(var.shapedType);
-  if (!type || !type.hasStaticShape() || !type.getElementType().isIntOrFloat())
+  if (!type || type.getRank() == 0 || !type.hasStaticShape() ||
+      !type.getElementType().isIntOrFloat())
     return;
   unsigned logicalBits = 0;
   SmallVector<int64_t> widths;

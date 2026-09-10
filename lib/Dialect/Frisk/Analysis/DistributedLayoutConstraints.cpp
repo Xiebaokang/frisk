@@ -20,6 +20,8 @@ LogicalResult collectDistributedLayoutConstraints(
     auto type = dyn_cast<RankedTensorType>(value.getType());
     if (!type)
       return anchor->emitError("distributed inference requires ranked tensor types");
+    if (type.getRank() == 0)
+      return anchor->emitError("distributed inference requires nonzero-rank tensor tiles");
     if (!type.hasStaticShape() || llvm::any_of(type.getShape(), [](int64_t extent) {
           return extent <= 1 || !llvm::isPowerOf2_64(extent);
         }))

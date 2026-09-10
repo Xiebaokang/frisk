@@ -26,6 +26,17 @@ protected:
     context.getOrLoadDialect<tensor::TensorDialect>();
   }
   MLIRContext context;
+  void expectDiagnostic(StringRef expected, llvm::function_ref<bool()> action) {
+    std::string text;
+    ScopedDiagnosticHandler handler(&context, [&](Diagnostic &diagnostic) {
+      llvm::raw_string_ostream stream(text);
+      diagnostic.print(stream);
+      stream << '\n';
+      return success();
+    });
+    EXPECT_TRUE(action());
+    EXPECT_NE(text.find(expected.str()), std::string::npos) << text;
+  }
   OwningOpRef<ModuleOp> dualConsumer() {
     auto module = parseSourceString<ModuleOp>(R"mlir(
     func.func @two(%a: memref<8x8xf32, 1>, %b: memref<8x8xf32, 1>,
@@ -105,16 +116,24 @@ TEST_F(DistributedPropagationTest, HardConsumerChoicesConvertExactlyOneRealUse) 
 
   auto missing = *solution;
   missing.conversions.clear();
-  EXPECT_TRUE(failed(verifySolvedLayoutGraph(*graph, missing, *target, module->getLoc())));
+  expectDiagnostic("missing a required consumer conversion", [&] {
+    return failed(verifySolvedLayoutGraph(*graph, missing, *target, module->getLoc()));
+  });
   auto duplicate = *solution;
   duplicate.conversions.push_back(edge);
-  EXPECT_TRUE(failed(verifySolvedLayoutGraph(*graph, duplicate, *target, module->getLoc())));
+  expectDiagnostic("invalid, duplicate, or identity conversion", [&] {
+    return failed(verifySolvedLayoutGraph(*graph, duplicate, *target, module->getLoc()));
+  });
   auto identity = *solution;
   identity.conversions.front().targetEncoding = edge.sourceEncoding;
-  EXPECT_TRUE(failed(verifySolvedLayoutGraph(*graph, identity, *target, module->getLoc())));
+  expectDiagnostic("invalid, duplicate, or identity conversion", [&] {
+    return failed(verifySolvedLayoutGraph(*graph, identity, *target, module->getLoc()));
+  });
   auto unauthorized = *solution;
   unauthorized.conversions.front().constraint = 9999;
-  EXPECT_TRUE(failed(verifySolvedLayoutGraph(*graph, unauthorized, *target, module->getLoc())));
+  expectDiagnostic("authorized graph edge", [&] {
+    return failed(verifySolvedLayoutGraph(*graph, unauthorized, *target, module->getLoc()));
+  });
 
   auto reordered = *graph;
   std::reverse(reordered.getConstraints().begin(), reordered.getConstraints().end());
@@ -178,7 +197,12 @@ TEST_F(DistributedPropagationTest, RejectsUnsupportedTensorShapesAndOperations) 
     auto module = parseSourceString<ModuleOp>(source, &context);
     ASSERT_TRUE(module);
     auto target = createSM90LayoutTarget();
-    EXPECT_TRUE(failed(collectLayoutConstraints(*module, *target))) << source.str();
+    StringRef expected = source.contains("unranked") ? "requires ranked tensor" :
+                         source.contains("external") ? "external tensor signature" :
+                         "power-of-two tile extents";
+    expectDiagnostic(expected, [&] {
+      return failed(collectLayoutConstraints(*module, *target));
+    });
   }
   auto module = parseSourceString<ModuleOp>(R"mlir(
     func.func @unknown(%arg: tensor<8xf32>) -> f32 {
@@ -188,7 +212,9 @@ TEST_F(DistributedPropagationTest, RejectsUnsupportedTensorShapesAndOperations) 
     })mlir", &context);
   ASSERT_TRUE(module);
   auto target = createSM90LayoutTarget();
-  EXPECT_TRUE(failed(collectLayoutConstraints(*module, *target)));
+  expectDiagnostic("operation has no layout constraint model", [&] {
+    return failed(collectLayoutConstraints(*module, *target));
+  });
 }
 
 TEST_F(DistributedPropagationTest, ConversionCountPrecedesCandidateOrdinal) {
@@ -264,7 +290,9 @@ TEST_F(DistributedPropagationTest, RealUseComponentsRespectEightVariableBound) {
   auto graph = collectLayoutConstraints(*module, *target);
   ASSERT_TRUE(succeeded(graph));
   ASSERT_EQ(graph->getVariables().size(), 9u);
-  EXPECT_TRUE(failed(solveBootstrapLayoutGraph(*graph, *target)));
+  expectDiagnostic("too many variables", [&] {
+    return failed(solveBootstrapLayoutGraph(*graph, *target));
+  });
 }
 
 TEST_F(DistributedPropagationTest, DomainOverflowIsNotSilentlyTruncated) {
@@ -283,7 +311,9 @@ TEST_F(DistributedPropagationTest, DomainOverflowIsNotSilentlyTruncated) {
     ASSERT_TRUE(llvm::none_of(var.candidates, [&](auto candidate) { return candidate.value == *fifth; }));
     var.candidates.push_back({*fifth, kInvalidProvenanceID, 5});
   }
-  EXPECT_TRUE(failed(solveBootstrapLayoutGraph(*graph, *target)));
+  expectDiagnostic("candidate domain is too large", [&] {
+    return failed(solveBootstrapLayoutGraph(*graph, *target));
+  });
 }
 
 TEST_F(DistributedPropagationTest, FunctionResultBindingsSurviveFinalize) {
@@ -305,5 +335,85 @@ TEST_F(DistributedPropagationTest, FunctionResultBindingsSurviveFinalize) {
     ++slots;
   }
   EXPECT_EQ(slots, 1u);
+}
+
+TEST_F(DistributedPropagationTest, CustomNamedTransposePreservesEndpointEncodings) {
+  auto module = parseSourceString<ModuleOp>(R"mlir(
+    #smap = #frisk.bit_linear<inputs = ["lane"], input_bits = [3],
+      outputs = ["row", "column"], output_bits = [1, 2],
+      matrix = dense<[[1, 0, 0], [0, 1, 0], [0, 0, 1]]> : tensor<3x3xi1>>
+    #dmap = #frisk.bit_linear<inputs = ["lane"], input_bits = [3],
+      outputs = ["width", "height"], output_bits = [2, 1],
+      matrix = dense<[[0, 1, 0], [0, 0, 1], [1, 0, 0]]> : tensor<3x3xi1>>
+    #src = #frisk.distributed<map = #smap, topology = [1, 8, 1, 1, 1], replication = 1>
+    #dst = #frisk.distributed<map = #dmap, topology = [1, 8, 1, 1, 1], replication = 1>
+    func.func @custom(%arg: tensor<2x4xf32, #src>) {
+      %init = tensor.empty() : tensor<4x2xf32, #dst>
+      %out = linalg.transpose ins(%arg : tensor<2x4xf32, #src>)
+        outs(%init : tensor<4x2xf32, #dst>) permutation = [1, 0]
+      return
+    })mlir", &context);
+  ASSERT_TRUE(module);
+  ASSERT_TRUE(succeeded(verify(*module)));
+  auto target = createSM90LayoutTarget();
+  auto graph = collectLayoutConstraints(*module, *target);
+  ASSERT_TRUE(succeeded(graph));
+  ASSERT_TRUE(succeeded(propagateCommonToFixedPoint(*graph)));
+  for (const auto &relation : graph->getConstraints()) {
+    if (relation.kind != ConstraintKind::TransformLayout) continue;
+    auto source = relation.vars[0], destination = relation.vars[1];
+    Attribute src = graph->getVariable(source).candidates.front().value;
+    Attribute dst = graph->getVariable(destination).candidates.front().value;
+    auto forward = projectLayoutCandidate(*graph, relation, source, src, destination);
+    auto reverse = projectLayoutCandidate(*graph, relation, destination, dst, source);
+    ASSERT_TRUE(succeeded(forward));
+    ASSERT_TRUE(succeeded(reverse));
+    EXPECT_EQ(*forward, dst);
+    EXPECT_EQ(*reverse, src);
+    EXPECT_FALSE(layoutEncodingsEqual(src, dst));
+    auto encoding = cast<DistributedEncodingAttr>(src);
+    auto map = cast<BitLinearLayoutMapAttr>(encoding.getMap());
+    Builder attributes(&context);
+    auto relabeledMap = BitLinearLayoutMapAttr::get(&context,
+        map.getInputNames(), map.getInputBitWidths(),
+        attributes.getArrayAttr({attributes.getStringAttr("consumer_axis0"),
+                                 attributes.getStringAttr("consumer_axis1")}),
+        map.getOutputBitWidths(), map.getMatrix());
+    auto relabeled = DistributedEncodingAttr::get(&context, relabeledMap,
+        encoding.getTopology(), encoding.getReplication());
+    EXPECT_FALSE(layoutEncodingsEqual(src, relabeled));
+    // A synthetic use's original type names are not its hard expected names.
+    EXPECT_TRUE(layoutRelationCompatible(*graph, relation, source, relabeled,
+                                         destination, dst));
+    EXPECT_TRUE(layoutRelationCompatible(*graph, relation, destination, dst,
+                                         source, relabeled));
+  }
+  auto solution = solveBootstrapLayoutGraph(*graph, *target);
+  ASSERT_TRUE(succeeded(solution));
+  EXPECT_TRUE(solution->conversions.empty());
+  EXPECT_TRUE(succeeded(verifySolvedLayoutGraph(*graph, *solution, *target, module->getLoc())));
+}
+
+TEST_F(DistributedPropagationTest, RankZeroIsRejectedBeforeCandidateConstruction) {
+  auto module = parseSourceString<ModuleOp>(
+      "func.func @scalar(%arg: tensor<f32>) { return }", &context);
+  ASSERT_TRUE(module);
+  auto target = createSM90LayoutTarget();
+  expectDiagnostic("nonzero-rank", [&] {
+    return failed(collectLayoutConstraints(*module, *target));
+  });
+  LayoutVar scalar;
+  scalar.kind = LayoutKind::Distributed;
+  scalar.shapedType = RankedTensorType::get({}, Builder(&context).getF32Type());
+  SmallVector<LayoutCandidate> candidates;
+  std::string diagnostics;
+  ScopedDiagnosticHandler handler(&context, [&](Diagnostic &diagnostic) {
+    llvm::raw_string_ostream stream(diagnostics);
+    diagnostic.print(stream);
+    return success();
+  });
+  target->enumerateCandidates(scalar, candidates);
+  EXPECT_TRUE(candidates.empty());
+  EXPECT_TRUE(diagnostics.empty()) << diagnostics;
 }
 } // namespace

@@ -49,8 +49,13 @@ All relation users share `LayoutRelations.cpp`. SameLayout/Keep preserve exact
 encoding equality, including named map metadata, so equal-layout reasoning
 does not produce unequal SSA tensor types. Transform permutes logical row
 blocks of a canonical bit-linear map; inverse projection uses the inverse
-permutation. Different naming conventions are not silently normalized into
-the same public tensor type.
+permutation. Transform compatibility uses the actual destination candidate's
+output labels, so source `row/column` and destination `width/height` remain
+valid independent conventions. Generation prefers declared endpoint labels
+as proposals and otherwise retains source positional labels; a synthetic use's
+original producer type does not impose a new hard naming constraint. Different
+encodings are still not silently treated as the same public tensor type by
+SameLayout or Keep.
 
 Storage access is `S(D(h))`: valid D covers the tile and valid S addresses that
 same logical shape/element type. Mixed affine-storage/bit-linear-distributed
@@ -60,13 +65,16 @@ Replicated tile_store remains valid because its semantics require lowering to
 elect one deterministic owner and write each logical element exactly once.
 Legacy M2 storage-copy equality and storage capacity verification remain.
 
-M1's bit-linear verifier is retained: ranked static power-of-two logical
+M1's bit-linear verifier is retained: nonzero-rank static power-of-two logical
 extents are required; named logical extents of one are unsupported because
 named zero-bit dimensions are forbidden. Unit hardware dimensions are omitted
 from map inputs, while topology still records their extent one. Bootstrap
 distributed candidates/transfer relations are single-CTA only. No new
 cross-CTA transfer, arbitrary affine distributed map, or performance model is
 introduced.
+The analysis conversion relation admits verified single-CTA topologies; the
+Task 17 bootstrap lowering subset must explicitly reject execution-topology
+combinations it cannot implement, rather than silently mislowering them.
 
 ## Task 16 handoff
 

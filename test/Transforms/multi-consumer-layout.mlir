@@ -31,8 +31,8 @@ func.func @two(%a: memref<8x8xf32, 1>, %b: memref<8x8xf32, 1>,
 
 // A valid DPS transpose imposes an independently encoded consumer contract.
 // Only its input use converts; the independent store keeps the producer layout.
-#a_map = #frisk.bit_linear<inputs = ["lane"], input_bits = [2], outputs = ["dim0"], output_bits = [2], matrix = dense<[[1, 0], [0, 1]]> : tensor<2x2xi1>>
-#b_map = #frisk.bit_linear<inputs = ["lane"], input_bits = [2], outputs = ["dim0"], output_bits = [2], matrix = dense<[[0, 1], [1, 0]]> : tensor<2x2xi1>>
+#a_map = #frisk.bit_linear<inputs = ["lane"], input_bits = [2], outputs = ["row"], output_bits = [2], matrix = dense<[[1, 0], [0, 1]]> : tensor<2x2xi1>>
+#b_map = #frisk.bit_linear<inputs = ["lane"], input_bits = [2], outputs = ["row"], output_bits = [2], matrix = dense<[[0, 1], [1, 0]]> : tensor<2x2xi1>>
 #a = #frisk.distributed<map = #a_map, topology = [1, 4, 1, 1, 1], replication = 1>
 #b = #frisk.distributed<map = #b_map, topology = [1, 4, 1, 1, 1], replication = 1>
 func.func @contract(%x: tensor<4xf16, #a>, %out: memref<4xf16, 3>) {

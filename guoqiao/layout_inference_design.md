@@ -1052,3 +1052,22 @@ unittests/Dialect/Frisk/Layout/
 6. 让一个双 consumer 用例选择共同布局或显式 conversion，并通过最小 lowering adapter 的正确性测试。
 
 这两个连续切片依次验证 MemRef storage binding、组合布局代数、SSA encoding、约束求解和 conversion 物化，避免布局代数、IR 迁移与完整 GEMM 同时失控。完成后再迁移 Gemm/Reduce 并接入 WGMMA/TMA 布局契约。
+
+## 17. M3 Task 15 当前实现边界
+
+Distributed SSA/use graph、双向 transpose relation、候选闭包后单调裁剪、
+以及按新增 conversion 数优先的有界求解已实现；细节和 Task 16 接口见
+[M3 Task 15 analysis contract](m3_task15_analysis.md)。
+
+- Bootstrap 上限仍为每连通分量 8 variables、每 domain 4 candidates；不静默截断。
+- `StorageAccess` 的正确性关系为 `S(D(h))`，coalescing 是 soft preference；
+  replicated store 的 lowering 必须选定唯一 deterministic owner。
+- SameLayout/Keep 保留 exact SSA encoding equality；Transpose 按 tensor axis
+  permutation 比较物理映射，并允许 source/destination 使用不同合法 output labels。
+- 当前支持非零 rank、静态 power-of-two bit-linear tensor tile；逻辑 extent 1
+  受 M1 禁止 named zero-bit dimension 的限制，rank 0 会在候选构造前明确拒绝。
+- `analysis-only` 完成 collect/solve/verify 且不改 IR；Task 16 负责 SCF
+  if/for/while collection 和 Tensor/SCF/function type 的一致物化。当前未知 tensor
+  op、tensor call、external tensor signature 明确失败，不宣称完整 Distributed lowering。
+- Conversion analysis 限 single CTA；Task 17 的测试 lowering 必须明确诊断其
+  无法支持的 execution-topology 组合。性能优化和 GPU 验收仍属于后续里程碑。

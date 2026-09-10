@@ -32,7 +32,8 @@ static bool sameLogicalType(Type lhs, Type rhs) {
 
 static FailureOr<Attribute> permuteEncoding(Attribute candidate,
                                            Attribute transform,
-                                           ShapedType target, bool inverse) {
+                                           ShapedType target, bool inverse,
+                                           ArrayAttr outputNames = {}) {
   auto encoding = dyn_cast<DistributedEncodingAttr>(candidate);
   auto permutation = dyn_cast_or_null<DenseI64ArrayAttr>(transform);
   if (!encoding || !permutation)
@@ -41,6 +42,18 @@ static FailureOr<Attribute> permuteEncoding(Attribute candidate,
   if (!map || permutation.size() != map.getOutputBitWidths().size())
     return failure();
   unsigned rank = permutation.size();
+  // Logical output labels describe the destination's positional axes. Prefer
+  // an actual destination candidate's names for compatibility; generation may
+  // use declared endpoint names as a proposal, never as an extra hard binding.
+  if (!outputNames)
+    if (auto tensor = dyn_cast<RankedTensorType>(target))
+      if (auto declared = dyn_cast_or_null<DistributedEncodingAttr>(tensor.getEncoding()))
+        if (auto declaredMap = dyn_cast<BitLinearLayoutMapAttr>(declared.getMap()))
+          outputNames = declaredMap.getOutputNames();
+  if (!outputNames)
+    outputNames = map.getOutputNames();
+  if (outputNames.size() != rank)
+    return failure();
   SmallVector<int64_t> order(permutation.asArrayRef());
   SmallVector<bool> seen(rank, false);
   for (int64_t dim : order) {
@@ -63,19 +76,17 @@ static FailureOr<Attribute> permuteEncoding(Attribute candidate,
   auto matrix = map.getMatrix().getValues<APInt>();
   unsigned columns = map.getMatrix().getType().getShape()[1];
   SmallVector<int64_t> widths;
-  SmallVector<Attribute> names;
   Builder builder(candidate.getContext());
-  for (auto [index, source] : llvm::enumerate(order)) {
+  for (int64_t source : order) {
     int64_t width = map.getOutputBitWidths()[source];
     widths.push_back(width);
-    names.push_back(builder.getStringAttr("dim" + Twine(index)));
     for (unsigned row = starts[source]; row < starts[source] + width; ++row)
       for (unsigned col = 0; col < columns; ++col)
         matrixValues.push_back(matrix[row * columns + col]);
   }
   auto transformed = BitLinearLayoutMapAttr::get(
       candidate.getContext(), map.getInputNames(), map.getInputBitWidths(),
-      builder.getArrayAttr(names), builder.getDenseI64ArrayAttr(widths),
+      outputNames, builder.getDenseI64ArrayAttr(widths),
       DenseIntElementsAttr::get(map.getMatrix().getType(), matrixValues));
   auto result = DistributedEncodingAttr::get(candidate.getContext(), transformed,
                                              encoding.getTopology(),
@@ -122,7 +133,15 @@ bool layoutRelationCompatible(const LayoutConstraintGraph &graph,
                               LayoutVarID rhsID, Attribute rhs) {
   const LayoutVar &a = graph.getVariable(lhsID), &b = graph.getVariable(rhsID);
   if (relation.kind == ConstraintKind::TransformLayout) {
-    auto projected = projectLayoutCandidate(graph, relation, lhsID, lhs, rhsID);
+    auto destination = dyn_cast<DistributedEncodingAttr>(rhs);
+    if (!destination)
+      return false;
+    auto destinationMap = dyn_cast<BitLinearLayoutMapAttr>(destination.getMap());
+    if (!destinationMap)
+      return false;
+    auto projected = permuteEncoding(
+        lhs, relation.coordinateTransform, cast<ShapedType>(b.shapedType),
+        lhsID != relation.vars.front(), destinationMap.getOutputNames());
     return succeeded(projected) && layoutEncodingsEqual(*projected, rhs);
   }
   if (relation.kind == ConstraintKind::Convertible) {
