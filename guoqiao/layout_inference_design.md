@@ -643,6 +643,20 @@ CostVector = (
 
 转换清理不能承担“修复错误推断”的职责；它只优化已验证的显式转换。
 
+M3 Task 16 已实现物化子阶段；转换清理与 lowering 不属于该阶段。实现仅接受
+`ModuleOp` transaction root：按原始 `Value` 解析 encoding（不按 `Type` 缓存），
+将 solver 选中的 consumer use 快照为 owner/operand index，在 detached module
+中重建一致的 function/SCF/Tensor 类型和选定 conversion。原生 properties、属性、
+location、scalar CFG 及 region captures 保留；DenseElements 常量属性随结果重塑。
+完整 staged IR 通过 MLIR verifier 和布局关系验证后，才以一次 body transfer 提交；
+任何失败均不修改原始 IR。graph/solution 为借用输入，其原始 SSA/use 身份仅在提交前
+有效；提交后不可解引用其中的 `Value`、`Operation *`、`OpOperand *`，但容器可正常销毁。
+
+物化后验证使用 `LayoutCollectionMode::RelationsOnly` 收集实际关系，不生成候选、
+不传播求解。definition、synthetic consumer use、function result 均固定为 IR 中实际
+存在的 encoding；不能用假想的后续 Convertible 边掩盖缺失 conversion。实现和回归记录见
+[M3 Task 16 materialization](m3_task16_materialization.md)。
+
 ### 8.12 阶段 K：lowering
 
 以下是长期完整流水线，而不是当前布局系统实施计划的全部交付范围：
@@ -744,8 +758,11 @@ Reduce 规则由 `(input layout, axes, combiner, output shape)` 推导：
 ### 9.9 Region、Parallel 与控制流
 
 - `scf.if` 的各分支 yield 与 result 必须统一 encoding；否则在分支内部插入 conversion，不能修改 join 后类型逃避约束。
-- `scf.for` 的 init、iter_arg、yield、result 是同一 layout equivalence class。
-- `scf.while` 的 before/after region 按 RegionBranch 接口建立双向约束。
+- `scf.for` 的 iter_arg/result 是 hard-equal slot；init/yield 的 consumer use
+  可由 solver 选择 conversion 到该 slot，物化后四者类型一致。
+- `scf.while` 分别约束两个 tuple：init/before arguments/after-region yield，
+  以及 condition forwarded arguments/after arguments/results。两个 tuple 可有不同
+  arity/type；condition predicate 不计入 forwarded slot，不能按位置强行合并两侧。
 - `frisk.parallel` 提供 topology 和硬件坐标域，不递归手调每个具体 op 的 `inferLayout`。
 - Region 内未知但只操作 scalar 的 op 可忽略；未知 tensor/memref layout-bearing op 若未实现接口，应给出 unsupported diagnostic。
 
@@ -1053,7 +1070,7 @@ unittests/Dialect/Frisk/Layout/
 
 这两个连续切片依次验证 MemRef storage binding、组合布局代数、SSA encoding、约束求解和 conversion 物化，避免布局代数、IR 迁移与完整 GEMM 同时失控。完成后再迁移 Gemm/Reduce 并接入 WGMMA/TMA 布局契约。
 
-## 17. M3 Task 15 当前实现边界
+## 17. M3 Task 15–16 当前实现边界
 
 Distributed SSA/use graph、双向 transpose relation、候选闭包后单调裁剪、
 以及按新增 conversion 数优先的有界求解已实现；细节和 Task 16 接口见
@@ -1066,8 +1083,11 @@ Distributed SSA/use graph、双向 transpose relation、候选闭包后单调裁
   permutation 比较物理映射，并允许 source/destination 使用不同合法 output labels。
 - 当前支持非零 rank、静态 power-of-two bit-linear tensor tile；逻辑 extent 1
   受 M1 禁止 named zero-bit dimension 的限制，rank 0 会在候选构造前明确拒绝。
-- `analysis-only` 完成 collect/solve/verify 且不改 IR；Task 16 负责 SCF
-  if/for/while collection 和 Tensor/SCF/function type 的一致物化。当前未知 tensor
-  op、tensor call、external tensor signature 明确失败，不宣称完整 Distributed lowering。
+- `analysis-only` 完成 collect/solve/verify 且不改 IR；Task 16 已实现 SCF
+  if/for/while collection 和 ModuleOp-only detached transaction，一致物化
+  Tensor/SCF/function type。借用 graph/solution 的原始身份只在提交前有效；
+  staged `RelationsOnly` 验证将 consumer 固定为实际 operand encoding，不重新求解。
+  详细契约见 [M3 Task 16 materialization](m3_task16_materialization.md)。当前未知
+  tensor op、tensor call、external tensor signature 明确失败，不宣称完整 Distributed lowering。
 - Conversion analysis 限 single CTA；Task 17 的测试 lowering 必须明确诊断其
   无法支持的 execution-topology 组合。性能优化和 GPU 验收仍属于后续里程碑。

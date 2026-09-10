@@ -117,6 +117,41 @@ TEST_F(LayoutMaterializationTest, ValueAwareTypesNeverCacheByTensorType) {
   EXPECT_FALSE(converter.convertType(a.getType()));
 }
 
+TEST_F(LayoutMaterializationTest, PublicConverterDiagnosesInvalidAssignments) {
+  auto module = parseSourceString<ModuleOp>(R"mlir(
+    func.func @unencoded(%arg: tensor<4xf16>) { return }
+  )mlir", &context);
+  ASSERT_TRUE(module);
+  auto graph = collectLayoutConstraints(*module, *target);
+  ASSERT_TRUE(succeeded(graph));
+  auto function = *module->getOps<func::FuncOp>().begin();
+  BlockArgument argument = function.getArgument(0);
+  argument.setLoc(FileLineColLoc::get(&context, "converter-test", 7, 3));
+  auto id = graph->lookupVariable(argument);
+  ASSERT_TRUE(id);
+  for (bool missing : {true, false}) {
+    LayoutSolution solution;
+    if (!missing)
+      solution.assignments[*id] = StringAttr::get(&context, "not-a-layout");
+    LayoutTypeConverter converter(*graph, solution);
+    unsigned count = 0;
+    std::string diagnostics;
+    ScopedDiagnosticHandler capture(&context, [&](Diagnostic &diagnostic) {
+      ++count;
+      EXPECT_EQ(diagnostic.getSeverity(), DiagnosticSeverity::Error);
+      EXPECT_EQ(diagnostic.getLocation(), argument.getLoc());
+      llvm::raw_string_ostream stream(diagnostics);
+      diagnostic.print(stream);
+      return success();
+    });
+    EXPECT_TRUE(failed(converter.convertLayoutBearingTensor(argument)));
+    EXPECT_EQ(count, 1u);
+    EXPECT_NE(diagnostics.find(missing ? "missing distributed layout assignment"
+                                      : "layout assignment is not a distributed encoding"),
+              std::string::npos) << diagnostics;
+  }
+}
+
 TEST_F(LayoutMaterializationTest, RebuildFailureAfterStorageCloneRollsBack) {
   auto module = parseSourceString<ModuleOp>(R"mlir(
     func.func @load(%p: memref<4xf16, 3>) {

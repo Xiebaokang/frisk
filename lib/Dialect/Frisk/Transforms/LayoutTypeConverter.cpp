@@ -18,9 +18,19 @@ LayoutTypeConverter::convertLayoutBearingTensor(Value value) const {
     emitError(value.getLoc()) << "tensor has no distributed definition binding";
     return failure();
   }
-  auto encoding = dyn_cast_or_null<DistributedEncodingAttr>(
-      solution.assignments.lookup(*id));
-  if (!encoding || failed(encoding.verifyForType(type, value.getLoc())))
+  Attribute assignment = solution.assignments.lookup(*id);
+  if (!assignment) {
+    emitError(value.getLoc()) << "missing distributed layout assignment for tensor definition '"
+                             << graph.getVariable(*id).stableName << "'";
+    return failure();
+  }
+  auto encoding = dyn_cast<DistributedEncodingAttr>(assignment);
+  if (!encoding) {
+    emitError(value.getLoc()) << "layout assignment is not a distributed encoding for tensor definition '"
+                             << graph.getVariable(*id).stableName << "': " << assignment;
+    return failure();
+  }
+  if (failed(encoding.verifyForType(type, value.getLoc())))
     return failure();
   if (type.getEncoding() && type.getEncoding() != encoding) {
     emitError(value.getLoc()) << "materialization would overwrite an explicit hard binding";
