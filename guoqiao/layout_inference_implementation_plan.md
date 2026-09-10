@@ -1630,7 +1630,7 @@ frisk.tile_store %tile, %view
 
 首版 load/store 只表示 whole-tile、静态 shape；切片和动态 offset 在 M4 后扩展。
 
-- [ ] **Step 1: 写 Op verifier 红灯测试**
+- [X] **Step 1: 写 Op verifier 红灯测试**
 
 覆盖：load shape/dtype 不匹配、store shape 不匹配、convert source/target shape 或 element type 不同、identity convert。
 
@@ -1644,11 +1644,11 @@ Run: `cmake --build build --target check-frisk --parallel 32`。
 
 Expected: FAIL，新 Ops 尚不存在。
 
-- [ ] **Step 2: 定义 carrier Ops**
+- [X] **Step 2: 定义 carrier Ops**
 
-`TileLoadOp` 具有 MemRead，`TileStoreOp` 具有 MemWrite，`ConvertLayoutOp` 为 pure。Convert verifier 要求 source/target 均有合法 `DistributedEncodingAttr` 且不相等；identity 输入交给 canonicalizer 删除，parser verifier 测试使用 canonicalization 前合法表示时不得崩溃。
+`TileLoadOp` 具有 MemRead，`TileStoreOp` 具有 MemWrite，`ConvertLayoutOp` 为 pure。Convert verifier 要求 source/target 均有合法 `DistributedEncodingAttr`；identity convert 是合法输入并交给 canonicalizer 删除，materializer 后续拒绝主动生成 identity convert。parser verifier 测试使用 canonicalization 前合法表示时不得崩溃。
 
-- [ ] **Step 3: 实现基础 canonicalization**
+- [X] **Step 3: 实现基础 canonicalization**
 
 ```text
 convert_layout(x, src == dst) -> x
@@ -1657,7 +1657,7 @@ convert_layout(convert_layout(x, A -> B), B -> A) -> x
 
 第二条仅在没有 side effect 且 canonical map 精确等价时应用。
 
-- [ ] **Step 4: 运行 IR tests**
+- [X] **Step 4: 运行 IR tests**
 
 Run:
 
@@ -1667,7 +1667,7 @@ cmake --build build --target FriskIR check-frisk --parallel 32
 
 Expected: carrier/convert tests PASS。
 
-- [ ] **Step 5: 提交 Tensor carrier**
+- [X] **Step 5: 提交 Tensor carrier**
 
 ```bash
 git add include/Dialect/Frisk/IR lib/Dialect/Frisk/IR test

@@ -168,6 +168,15 @@ tensor<64x64xbf16, #frisk.distributed<map = #frisk.product<...>, ...>>
 - Tensor 是不可变值，天然使用 SSA def-use。
 - Encoding 是类型的一部分；两个不同 encoding 的 Tensor 不能在没有显式转换的情况下被当成同一物理分布。
 - `frisk.convert_layout` 是显式 SSA 操作，便于 CSE、hoist、rematerialization、代价统计和 verifier 检查。
+- `frisk.tile_load`/`frisk.tile_store` 首版只搬运静态 whole tile。load 的 MemRead 和
+  store 的 MemWrite 均精确绑定到 MemRef operand。带 distributed encoding 的 Tensor
+  carrier 必须针对其完整公共 RankedTensor shape 通过 encoding verifier；推断前也允许
+  暂无 encoding 的 carrier。`tile_store` 对每个 logical element 只写一次；若输入布局有
+  replicated owners，lowering 必须确定性选择一个 source owner，复制不代表允许多个线程
+  对同一物理元素重复写入。
+- identity `frisk.convert_layout` 是合法的输入 IR，并由 canonicalization 消除；布局
+  materializer 不得生成 identity conversion。精确的 A→B→A conversion pair 可在结果
+  类型安全且 canonical distributed map、topology 和 replication 相等时折叠。
 - Scalar 不强制携带布局；标量广播到 Tile 时才产生 replicated candidate。
 
 MLIR 的 `RankedTensorType` 原生支持 encoding attribute，因此无需自定义一个重复的 Frisk TensorType。参考：[MLIR Builtin Dialect](https://mlir.llvm.org/docs/Dialects/Builtin/)。
