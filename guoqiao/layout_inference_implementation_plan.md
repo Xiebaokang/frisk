@@ -10,6 +10,8 @@
 
 > **执行状态（2026-09-10）：M0–M3 已完成并通过 Gate；M3 逐任务及整分支审查通过。下一未完成里程碑为 M4（Task 18）。**
 
+> **工作区说明（文档同步于 2026-09-11）：上述 M3 状态对应 `feature/m3-distributed-layout` 的已验收实现（`642c30b`），代码位于 `/home/baopeihua/frisk/.worktrees/m3-distributed-layout`。主工作区 `/home/baopeihua/frisk` 的 `main` 代码仍停留在 M2（`f65c54d`）；同步本文及其引用说明文档不等于合并 M3 代码。M3 构建/测试命令应在该 M3 工作树执行。**
+
 ## Global Constraints
 
 - 首个目标仅为 NVIDIA SM90/SM90a；不得在通用 solver 中散布 target 字符串判断。
@@ -1602,6 +1604,22 @@ Expected: alloc/view/copy Storage slice 完整通过；`LayoutInfer.cpp` 不再�
 
 ## M3：Distributed Tensor 与 conversion 纵向切片
 
+### 实际实现与原计划的调整记录
+
+本节按已验收代码维护，而不仅标记复选框。下列调整已落实到 Task 14–17 的正文：
+
+| 原计划的简写或假设                                    | 实际实现及原因                                                                                                                                                                |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| convert 两端 encoding 必须不同，但又要求消除 identity | identity 是合法输入；仅拒绝 solver 请求新插入 identity，清理替换须保持精确 SSA 类型。                                                                                         |
+| `tensor.transpose`                                  | 本工具链没有该 Op；使用已注册的`linalg.transpose` Tensor DPS，建模输入 use、init 和 result。                                                                                |
+| 两种 Storage 布局要求两个 Distributed 候选/转换       | `StorageAccess` 证明 `S(D(h))` 的合法性，不把 coalescing 当硬约束；linear/transpose 两个 store 可以共同布局零转换。另用独立硬编码的活跃 transpose consumer 验证一次转换。 |
+| 候选集合从始至终只缩小                                | 收集阶段先由硬 seed 和 target templates 双向投影生成闭包；之后 strict/common propagation 才单调裁剪。                                                                         |
+| 逐 Op 改类型、while 所有位置一组相等                  | 按原始 Value 定型并重建 detached ModuleOp；while 的输入 tuple 与 condition/result tuple 分开建模，验证成功后一次提交。                                                        |
+| 最小 lowering 可直接视为可执行 GPU 链路               | 当前仅生成测试用 GPU-level IR；Tensor↔thread-vector 桥接尚需 M6 消除，不能宣称 GPU runtime 验收完成。                                                                        |
+
+完成步骤中的 `Expected: FAIL` 是当时测试驱动实现的红灯预期，不是当前验收结果。
+本次状态同步不改变 M4–M6 的未完成任务或将其提前标为已实现。
+
 ### Task 14: 新增 Tensor carrier 和 `frisk.convert_layout`
 
 **Files:**
@@ -1655,7 +1673,7 @@ convert_layout(x, src == dst) -> x
 convert_layout(convert_layout(x, A -> B), B -> A) -> x
 ```
 
-第二条仅在没有 side effect 且 canonical map 精确等价时应用。
+删除 identity/inverse 时同时检查 canonical map 等价与替换值/result 的完整 SSA 类型相等；仅数学映射等价、但 encoding 不同，不足以直接替换。
 
 - [X] **Step 4: 运行 IR tests**
 
@@ -1687,12 +1705,22 @@ git commit -m "feat: add distributed tensor carriers"
 - Create: `test/Transforms/distributed-propagation.mlir`
 - Create: `test/Transforms/multi-consumer-layout.mlir`
 
+实际还新增 `lib/Dialect/Frisk/Analysis/DistributedLayoutConstraints.cpp`、
+`include/Dialect/Frisk/Analysis/LayoutRelations.h`、对应 `LayoutRelations.cpp`、
+`lib/Dialect/Frisk/Target/SM90/SM90DistributedCandidates.cpp` 和
+`test/Transforms/distributed-propagation-errors.mlir`；修改 `LayoutConstraint.h`、
+`LayoutSolver.h`、`LayoutVerifier.cpp`、`LayoutInfer.cpp`、`Passes.td` 及相关 CMake。
+Op 规则收集、共享关系判断与 SM90 候选枚举分别放在这些文件，未集中堆入原计划列出的文件。
+
 **Interfaces:**
 
 - Extends:
 
 ```cpp
 LayoutVarID LayoutConstraintBuilder::getOrCreateDistributedVar(Value value);
+LayoutVarID LayoutConstraintBuilder::getOrCreateDistributedUse(OpOperand &use);
+LogicalResult LayoutConstraintBuilder::convertible(
+    LayoutVarID src, LayoutVarID dst, OpOperand &use, bool existing = false);
 LogicalResult LayoutConstraintBuilder::transform(
     LayoutVarID src, LayoutVarID dst, Attribute coordinateTransform,
     Operation *source, StringRef rule);
@@ -1705,41 +1733,52 @@ FailureOr<LayoutSolution> solveBootstrapLayoutGraph(
     BootstrapSolverLimits limits);
 ```
 
-- [x] **Step 1: 写双 consumer 红灯测试**
+- [X] **Step 1: 写双 consumer 红灯测试**
 
-构造一个 `tile_load` 结果被两个 `tile_store` 使用，两个 destination view 分别绑定 linear 和 transpose storage。预期 analysis 保留两个 distributed candidate，而不是第一个 consumer 锁定结果。
+构造一个 `tile_load` 结果被两个 `tile_store` 使用，两个 destination view 分别绑定 linear 和 transpose storage。实际回归检查 producer 和两个 consumer use 均保留 4 个候选，求解选择共同布局、0 个转换，而不是由第一个 consumer 锁定 producer。StorageAccess 不将访存合并度当硬约束。
+
+另一个 `@contract` 用例使用 2x2 非 identity `linalg.transpose`、独立硬编码的 XOR 结果布局和使用原 producer 的 store；函数返回 transpose 结果，使 consumer 在 cleanup 后仍存活，并保留恰好一次输入 use 转换。
 
 Run: `cmake --build build --target check-frisk --parallel 32`。
 
 Expected: FAIL，collector 尚未创建 Distributed var。
 
-- [x] **Step 2: 收集基础 Distributed rules**
+- [X] **Step 2: 收集基础 Distributed rules**
 
-规则固定为：
+规则作用于 producer 定义与 consumer 实际期望的 use/slot，而非强制原 producer 与所有消费者布局相同：
 
 ```text
-tile_load/store -> StorageAccess
-arith/math elementwise tensor op -> SameLayout(all tensor operands/results)
-linalg.transpose (Tensor DPS) -> TransformLayout(permutation), init/result SameLayout
+tile_load -> StorageAccess(result definition, storage view)
+tile_store -> Convertible(producer, consumer use) + StorageAccess(consumer use, storage view)
+arith/math elementwise -> 同布局 results；tensor operand use 经 Convertible 满足结果布局
+linalg.transpose (Tensor DPS) -> TransformLayout(input use, result, permutation)；init use 经 Convertible 满足 result 布局
 existing tensor encoding -> RequireEncoding(hard)
 existing convert_layout -> source/target RequireEncoding(hard) + Convertible edge
+defined func -> entry argument / function result slot / return use；标量位置不改
+arith.constant(DenseElementsAttr), tensor.empty -> Tensor definition binding
 ```
 
-对于未知 layout-bearing Op，pass 必须报 `operation has no layout constraint model`。
+对于未知 layout-bearing Op，pass 必须报 `operation has no layout constraint model`；Tensor call、external Tensor signature 和非 dense Tensor constant 明确拒绝。SCF if/for/while 的收集同样位于 `DistributedLayoutConstraints.cpp`，随 Task 16 一并实现。
 
-- [x] **Step 3: 生成基础 distributed candidates**
+真实定义由 `LayoutVar::value` 标识，独立 consumer 期望由 `use` 标识，函数返回布局由 `functionResult` 标识；已有 result/join slot 可直接作为 consumer 期望，避免冗余变量。已编码 Tensor 的 hard binding 不因插入消费边转换而被覆盖。
 
-SM90 bootstrap candidates 只包含 blocked、lane-striped、warp-striped、fully-replicated；每个候选展开为 canonical map 并通过 type verifier。
+- [X] **Step 3: 生成基础 distributed candidates**
 
-- [x] **Step 4: 扩展 propagation 为双向关系投影**
+SM90 bootstrap 默认模板只有 blocked、lane-striped、warp-striped、fully-replicated 四类，展开并验证后去重；小形状可能得到少于 4 个不同默认候选。候选域还可来自已有合法硬编码和关系投影，不意味着拒绝所有不属于四类模板的显式布局。当前只接受非零 rank、每个逻辑 extent 大于 1 的静态 2 次幂 Tensor tile；extent=1 受 M1 named zero-bit dimension 限制而明确拒绝。
 
-StorageAccess 和 transpose 必须同时支持 producer→consumer、consumer→producer。候选集合只缩小；多 consumer 的 union-of-requirements 在 solve 前保留为 candidate alternatives，不得原地覆盖。
+- [X] **Step 4: 扩展 propagation 为双向关系投影**
 
-- [x] **Step 5: 扩展 bootstrap resolver，闭合第一条多 consumer 路径**
+先把已有硬 seed 投影到闭包；再逐个为尚无候选的变量枚举 target templates，每初始化一个域就继续投影到闭包。生成阶段允许添加候选；随后 strict/common propagation 执行双向支持检查和单调裁剪，避免丢掉其他 consumer 的合法选择。
+
+Transpose 按 permutation/逆 permutation 投影逻辑 bit-row blocks，并按实际目标候选的 output names 判断兼容性。Distributed↔Storage 的 `StorageAccess` 仅检查已验证映射的逻辑域/element type 匹配以证明 `S(D(h))`，不从 Storage 顺序强制推导 Distributed 排列；原 M2 Storage↔Storage copy 仍要求兼容的 storage map。
+
+- [X] **Step 5: 扩展 bootstrap resolver，闭合第一条多 consumer 路径**
 
 在既有 8-variable/4-candidate 上限内，允许每个可转换 consumer edge 枚举 `KeepCommonLayout` 或 `Convert`。目标顺序固定为：先满足 hard constraint，再最小化 conversion 数，最后比较 assignment/edge stable key；本阶段不宣称性能最优，也不枚举 rematerialization。求解结果必须把选中的 conversion 写入 `LayoutSolution::conversions`，供 Task 16 直接消费。
 
-- [x] **Step 6: 验证 fixed-point 与多 consumer**
+上限精确为每连通分量 8 个变量、每个变量域 4 个候选，超过直接诊断、不截断。已有显式 conversion 不再插入或计为新增转换。`analysis-only` 执行 collect/solve/verify 而不改 IR，`dump-analysis` 输出稳定图和选边。分析支持的 single-CTA topology 范围宽于 Task 17 测试 adapter，分析成功不等于该 adapter 能降低。
+
+- [X] **Step 6: 验证 fixed-point 与多 consumer**
 
 Run:
 
@@ -1749,9 +1788,9 @@ cmake --build build --target FriskLayoutUnitTests check-frisk --parallel 32
   --gtest_filter='DistributedPropagationTest.*'
 ```
 
-Expected: PASS；两个 consumer 候选均存在；bootstrap solution 明确选择共同布局或单个 consumer-edge conversion；顺序打乱结果不变。
+Expected: PASS；双 store 保留候选并选择零转换，独立硬编码的活跃 transpose consumer 选择一次 conversion；顺序打乱结果不变。
 
-- [x] **Step 7: 提交 Distributed propagation**
+- [X] **Step 7: 提交 Distributed propagation**
 
 ```bash
 git add lib/Dialect/Frisk test unittests
@@ -1773,6 +1812,11 @@ git commit -m "feat: propagate distributed layout constraints"
 - Create: `test/Transforms/materialize-scf.mlir`
 - Create: `test/Transforms/materialize-conversion.mlir`
 
+实际还修改 `DistributedLayoutConstraints.cpp`、`LayoutSolver.h` 和 `LayoutPropagation.cpp`
+以加入 SCF 关系及 `LayoutCollectionMode::RelationsOnly`，新增
+`test/Transforms/materialize-scalar-cfg.mlir` 和
+`unittests/Dialect/Frisk/Layout/LayoutMaterializationTest.cpp`，同步相关 CMake。
+
 **Interfaces:**
 
 - Produces:
@@ -1791,24 +1835,27 @@ LogicalResult materializeDistributedLayouts(
     ArrayRef<LayoutConversionEdge> conversions);
 ```
 
-- [x] **Step 1: 写 SCF 和 conversion 红灯测试**
+- [X] **Step 1: 写 SCF 和 conversion 红灯测试**
 
-覆盖 `scf.if` 两个 yield、`scf.for` init/block argument/yield/result，以及两个 consumer 需要不同 encoding 时在 consumer edge 前出现一次 conversion。
+覆盖 `scf.if` 两个 yield、`scf.for` init/block argument/yield/result、`scf.while` 不同 arity 的两组 tuple，以及多 consumer 的一次转换。实际文本用例在 transpose 输入 use 前插入 conversion，独立 tile_store 继续使用原 producer：
 
 ```mlir
 // CHECK: %[[CVT:.*]] = frisk.convert_layout %[[PRODUCER]]
-// CHECK: frisk.tile_store %[[CVT]], %[[DST]]
+// CHECK-NEXT: {{.*}}linalg.transpose ins(%[[CVT]]
+// CHECK: frisk.tile_store %[[PRODUCER]],
 ```
 
 Run: `cmake --build build --target check-frisk --parallel 32`。
 
 Expected: FAIL，Tensor type 尚未被改写。
 
-- [x] **Step 2: 实现非 region Op 的 type rewrite**
+- [X] **Step 2: 实现非 region Op 的 type rewrite**
 
-按 dominance order 克隆需要更改 result type 的 Op，使用 `IRMapping` 替换 operands/results；不得直接让 result type 与 Op verifier 暂时不一致。
+`LayoutTypeConverter` 按原始 SSA Value 查 solution；同一个原始 Tensor Type 的不同 Value 可得到不同布局，因此继承的 Type-only 转换路径明确拒绝 Tensor，不能按 Type 缓存布局。
 
-- [x] **Step 3: 实现 SCF 一致重写**
+实际实现仅接受 ModuleOp 根：预检 solution 并快照选中 use 的 owner/operand index，在 detached ModuleOp 中用 `Operation::create` 和 `IRMapping` 重建整个 body。保留属性、native properties、位置、successor、region 和标量参数；同步函数签名以及 DenseElementsAttr 的结果类型。逐 block 保留原操作顺序，调度时检查显式 operand 与嵌套 region 捕获值，使非 dominance 打印顺序的标量 CFG 也可处理；不是原地逐个 setType，也不是只克隆少数结果 Op。
+
+- [X] **Step 3: 实现 SCF 一致重写**
 
 固定规则：
 
@@ -1818,13 +1865,15 @@ scf.for: init == iter_arg == yield == result
 scf.while: init == before args == after yield; condition args == after args == results
 ```
 
-若分支内部需要转换，在 yield 前插入；不得修改 join 后类型逃避 hard constraint。
+这里的 init/yield/condition 等式指完成选中 use 转换后的 operand 编码，不要求其原 producer 定义预先相等。For 的 iter_arg/result、while 的 after args/results 直接硬相等；需要转换的 init、yield、condition use 分别在相应消费点插入。While 的两组 tuple 可以有不同 arity/type，predicate 不计入 forwarded operands，也不把 before/after 无关槽位强行绑定。不得修改 join 后类型逃避 hard constraint。
 
-- [x] **Step 4: 物化 solver 选中的 conversion edge**
+- [X] **Step 4: 物化 solver 选中的 conversion edge**
 
 只有 `LayoutSolution` 显式列出的 edge 才插入 `frisk.convert_layout`。source/target 相等时视为 solver/materializer bug 并失败；materializer 不重新比较成本。
 
-- [x] **Step 5: 运行 materialization tests**
+物化后先验证 staged MLIR，再用 `RelationsOnly` 重收集关系，把每个定义、实际 operand use、函数结果绑定到 IR 中实际存在的 encoding。此处不枚举候选、不传播、不重新求解，不能通过“假设未来会插入 conversion”掩盖缺失转换；同时保留 M2 alias/copy/capacity 检查。全部成功后只执行一次 module body transfer；任何失败都保留原 IR。提交后原 graph/solution 借用的 Value/Operation/OpOperand 身份失效，不可继续解引用。
+
+- [X] **Step 5: 运行 materialization tests**
 
 Run:
 
@@ -1834,7 +1883,7 @@ cmake --build build --target FriskTransforms check-frisk --parallel 32
 
 Expected: Tensor/SCF/conversion tests PASS，`-verify-each` 无错误。
 
-- [x] **Step 6: 提交 Distributed materialization**
+- [X] **Step 6: 提交 Distributed materialization**
 
 ```bash
 git add include/Dialect/Frisk/Transforms lib/Dialect/Frisk/Transforms test
@@ -1855,6 +1904,13 @@ git commit -m "feat: materialize distributed layouts and conversions"
 - Create: `test/Conversion/FriskLayoutToGPU/warp-shuffle.mlir`
 - Create: `test/Conversion/FriskLayoutToGPU/shared-exchange.mlir`
 
+实际还新增 `include/Conversion/FriskLayoutToGPU/LayoutConversionPlan.h` 及
+`lib/Conversion/FriskLayoutToGPU/LayoutConversionPlan.cpp`，让 emitter 与单元测试共享
+owner/payload plan；新增 `LayoutConversionPlanTest.cpp` 及 register-selection、
+replica-locality、scratch-budget、existing-scratch、unaccounted-scratch、unsupported
+测试文件。清理模式复用 `FriskLayoutOps.cpp` canonicalization，接线还修改 `Passes.h`、
+`lib/CMakeLists.txt`、`tools/frisk-opt/CMakeLists.txt` 和 unit-test CMake。
+
 **Interfaces:**
 
 - Produces:
@@ -1866,7 +1922,13 @@ std::unique_ptr<Pass> createTestLowerLayoutConversionsPass();
 
 已实现。详细 adapter 边界和 M6 Tensor↔thread-vector 桥接职责见 [Task 17 implementation](m3_task17_conversions.md)。测试 lowering 仅支持静态、单 CTA、BitLinear→BitLinear redistribution：同线程优先 register extraction，同 warp 优先 shuffle，跨 warp 使用真实 workgroup attribution + barrier exchange。两端 execution topology 必须匹配，lane=32，gpu.func 单 entry block 且 known_block_size 匹配；不支持的 scope/topology/dtype 明确诊断。
 
-- [x] **Step 1: 写 cleanup/lowering 红灯测试**
+公共 SSA 保持原始精确 RankedTensor 类型，内部使用 `builtin.unrealized_conversion_cast`
+连接每线程 vector；该表示桥接并非可执行的 tile_load/store lowering，M6 仍需接管和消除。
+此 adapter 不接受嵌套 SCF 转换，不支持循环 scratch 复用、跨 CTA/cluster 或 sub-byte。
+额外明确限制为至多 1024 threads、两端各至多 256 registers/thread、逻辑 volume≤65536、
+source+destination carrier visits≤262144、保守 shuffle-word count≤65536；均是 adapter 限额。
+
+- [X] **Step 1: 写 cleanup/lowering 红灯测试**
 
 覆盖 identity、A→B→A、相邻 A→B→C 合并，一个 lane permutation conversion 产生 `gpu.shuffle`，以及一个跨 warp permutation 产生 workgroup scratch store/barrier/load。动态 encoded tensor 在正常 IR 路径由 M1 verifier 先拒绝；programmatic planner negative 单独验证动态输入。可到达测试 adapter 的 unsupported 情况使用 `test lowering requires a static single-CTA redistribution` 前缀，未禁用 verifier。
 
@@ -1874,11 +1936,11 @@ Run: `cmake --build build --target check-frisk --parallel 32`。
 
 Expected: FAIL，passes 尚不存在。
 
-- [x] **Step 2: 实现 type-safe cleanup patterns**
+- [X] **Step 2: 实现 type-safe cleanup patterns**
 
 只实现数学上可证明的：identity elimination、相邻 conversion compose、inverse pair elimination。Pattern 必须调用 canonical map equality，不比较 Attr 指针。
 
-- [x] **Step 3: 实现单 warp redistribution 计划**
+- [X] **Step 3: 实现单 warp redistribution 计划**
 
 计算：
 
@@ -1888,11 +1950,11 @@ R = rightInverse(D_src) compose D_dst
 
 按 named input 解码每个目标 carrier 对应的 source lane/register，并验证 source coverage/bounds；replica 优先同 thread/warp。所有 source-register candidate shuffle 均在全 warp 无条件执行，之后按 destination 请求选择 register。i8/i16/i32/i64/f16/bf16/f32/f64 经 bit-preserving i32 words 传输；64-bit 拆分/重组。
 
-- [x] **Step 4: 实现单 CTA shared exchange**
+- [X] **Step 4: 实现单 CTA shared exchange**
 
 先用 canonical maps 为每个 live logical element证明唯一 source owner 和所有 destination owners，再以 logical linear index 分配 scratch slot：source owner 写入，执行一次 `gpu.barrier`，destination owner 读取。scratch 字节数按 element bit width、tile volume 和 alignment 精确计算；sub-byte 暂不支持。global writer election 与 local replica preference 分离。缺失 source/writer/slot proof 失败报告 logical coordinate；容量/类型限制给出具体原因。默认 49152-byte adapter budget（非 SM90 最大值）计入原 dtype byte size、既有 attribution、padding 和全部新增 scratch；dynamic/non-attributed workgroup storage 拒绝。
 
-- [x] **Step 5: 注册 passes 并运行测试**
+- [X] **Step 5: 注册 passes 并运行测试**
 
 Run:
 
@@ -1902,7 +1964,7 @@ cmake --build build --target FriskTransforms FriskLayoutToGPU FriskLayoutUnitTes
 
 Expected: cleanup、single-warp 和 shared-exchange FileCheck PASS；unsupported case 使用预期诊断失败；生成 IR 通过 `-verify-each`。
 
-- [x] **Step 6: 提交 conversion MVP**
+- [X] **Step 6: 提交 conversion MVP**
 
 ```bash
 git add include/Dialect/Frisk/Transforms lib/Conversion \
@@ -1919,10 +1981,17 @@ consumer 保留恰好一个选定 conversion，重复 infer/cleanup 输出逐字
 Run:
 
 ```bash
-cmake --build build --target check-frisk FriskLayoutUnitTests --parallel 32
+cmake --build build --target check-frisk FriskLayoutUnitTests frisk_attr_test \
+  frisk_reduce_layout_test frisk_layout_pass_test frisk_memory_effect_test --parallel 32
+build/unittests/Dialect/Frisk/FriskLayoutUnitTests
+ctest --test-dir build --output-on-failure
 build/bin/frisk-opt test/Transforms/multi-consumer-layout.mlir \
-  --split-input-file -frisk-infer-layouts -frisk-optimize-layout-conversions -verify-each
+  -frisk-infer-layouts -frisk-optimize-layout-conversions -verify-each
 ```
+
+以上命令从已配置的 M3 工作树 build 运行；`--split-input-file` 可选。该 lit 用例还
+检查活跃 consumer 及再次 infer/cleanup 后的输出逐字一致。构建命令同时刷新 CTest
+的四个 legacy test target；`check-frisk` 不代替执行独立的 layout unit 二进制。
 
 Expected: 多 consumer IR 合法；共同布局或 conversion 由 solution 明确决定；SCF 类型一致；单 warp 与单 CTA shared-exchange conversion 可以 lower，非支持路径明确失败。
 

@@ -70,8 +70,9 @@ git diff f65c54d..HEAD --check
 ```
 
 The implementation remains in the local `feature/m3-distributed-layout` branch
-at `/home/baopeihua/frisk/.worktrees/m3-distributed-layout`; the main worktree is
-unchanged at `f65c54d`. M4 begins with Task 18; formal CostVector and executable
+at `/home/baopeihua/frisk/.worktrees/m3-distributed-layout`; the main code remains
+at `f65c54d` (M3 documentation is also mirrored there as of 2026-09-11).
+M4 begins with Task 18; formal CostVector and executable
 GPU/runtime gates remain M5/M6. Pre-existing negative-unit diagnostic output
 and CMake CMP0116 configuration noise are nonblocking maintenance items, not
 test failures or M3 regressions.
