@@ -4,7 +4,7 @@
 > 日期：2026-08-16
 > 范围：NVIDIA SM90/SM90a；布局推断、布局验证与布局物化
 > 核心选择：Local/Register Tile 使用 `RankedTensorType + EncodingAttr`，Shared/Global 保持 MemRef，由统一约束系统连接分布式布局与存储布局
-> 实施状态（2026-09-06）：M0–M2 已完成；Storage alloc/view/copy 纵向切片已形成 constraint → propagation → solve → materialization → verification 闭环
+> 实施状态（2026-09-10）：M0–M3 已完成并通过 Gate、逐任务及整分支审查。Storage 与 Distributed Tensor 均形成 collect → solve → materialize → verify 闭环，conversion 支持静态单 CTA 测试降低；下一阶段为 M4，可执行 GPU 运行验收仍属 M6。
 
 ## 1. 结论先行
 
@@ -168,6 +168,15 @@ tensor<64x64xbf16, #frisk.distributed<map = #frisk.product<...>, ...>>
 - Tensor 是不可变值，天然使用 SSA def-use。
 - Encoding 是类型的一部分；两个不同 encoding 的 Tensor 不能在没有显式转换的情况下被当成同一物理分布。
 - `frisk.convert_layout` 是显式 SSA 操作，便于 CSE、hoist、rematerialization、代价统计和 verifier 检查。
+- `frisk.tile_load`/`frisk.tile_store` 首版只搬运静态 whole tile。load 的 MemRead 和
+  store 的 MemWrite 均精确绑定到 MemRef operand。带 distributed encoding 的 Tensor
+  carrier 必须针对其完整公共 RankedTensor shape 通过 encoding verifier；推断前也允许
+  暂无 encoding 的 carrier。`tile_store` 对每个 logical element 只写一次；若输入布局有
+  replicated owners，lowering 必须确定性选择一个 source owner，复制不代表允许多个线程
+  对同一物理元素重复写入。
+- identity `frisk.convert_layout` 是合法的输入 IR，并由 canonicalization 消除；布局
+  materializer 不得生成 identity conversion。精确的 A→B→A conversion pair 可在结果
+  类型安全且 canonical distributed map、topology 和 replication 相等时折叠。
 - Scalar 不强制携带布局；标量广播到 Tile 时才产生 replicated candidate。
 
 MLIR 的 `RankedTensorType` 原生支持 encoding attribute，因此无需自定义一个重复的 Frisk TensorType。参考：[MLIR Builtin Dialect](https://mlir.llvm.org/docs/Dialects/Builtin/)。
@@ -634,6 +643,20 @@ CostVector = (
 
 转换清理不能承担“修复错误推断”的职责；它只优化已验证的显式转换。
 
+M3 Task 16 已实现物化子阶段；转换清理与 lowering 不属于该阶段。实现仅接受
+`ModuleOp` transaction root：按原始 `Value` 解析 encoding（不按 `Type` 缓存），
+将 solver 选中的 consumer use 快照为 owner/operand index，在 detached module
+中重建一致的 function/SCF/Tensor 类型和选定 conversion。原生 properties、属性、
+location、scalar CFG 及 region captures 保留；DenseElements 常量属性随结果重塑。
+完整 staged IR 通过 MLIR verifier 和布局关系验证后，才以一次 body transfer 提交；
+任何失败均不修改原始 IR。graph/solution 为借用输入，其原始 SSA/use 身份仅在提交前
+有效；提交后不可解引用其中的 `Value`、`Operation *`、`OpOperand *`，但容器可正常销毁。
+
+物化后验证使用 `LayoutCollectionMode::RelationsOnly` 收集实际关系，不生成候选、
+不传播求解。definition、synthetic consumer use、function result 均固定为 IR 中实际
+存在的 encoding；不能用假想的后续 Convertible 边掩盖缺失 conversion。实现和回归记录见
+[M3 Task 16 materialization](m3_task16_materialization.md)。
+
 ### 8.12 阶段 K：lowering
 
 以下是长期完整流水线，而不是当前布局系统实施计划的全部交付范围：
@@ -735,8 +758,11 @@ Reduce 规则由 `(input layout, axes, combiner, output shape)` 推导：
 ### 9.9 Region、Parallel 与控制流
 
 - `scf.if` 的各分支 yield 与 result 必须统一 encoding；否则在分支内部插入 conversion，不能修改 join 后类型逃避约束。
-- `scf.for` 的 init、iter_arg、yield、result 是同一 layout equivalence class。
-- `scf.while` 的 before/after region 按 RegionBranch 接口建立双向约束。
+- `scf.for` 的 iter_arg/result 是 hard-equal slot；init/yield 的 consumer use
+  可由 solver 选择 conversion 到该 slot，物化后四者类型一致。
+- `scf.while` 分别约束两个 tuple：init/before arguments/after-region yield，
+  以及 condition forwarded arguments/after arguments/results。两个 tuple 可有不同
+  arity/type；condition predicate 不计入 forwarded slot，不能按位置强行合并两侧。
 - `frisk.parallel` 提供 topology 和硬件坐标域，不递归手调每个具体 op 的 `inferLayout`。
 - Region 内未知但只操作 scalar 的 op 可忽略；未知 tensor/memref layout-bearing op 若未实现接口，应给出 unsupported diagnostic。
 
@@ -891,6 +917,10 @@ NVIDIA 对 compute capability 9 的 TMA swizzle 给出了 32B/64B/128B 模式及
 
 ### M3：Distributed Tensor 与 conversion 纵向切片
 
+状态：已完成（2026-09-10）。27 个 lit、74 个 unit、4 个 CTest 及活跃多 consumer
+推断/清理的逐字一致 replay 通过；逐任务和整分支审查均通过。测试 adapter 的
+Tensor/vector 桥接仍需 M6 可执行 lowering 接管，不代表 GPU runtime 验收完成。
+
 工作：
 
 - Local/Register Tile 迁到 RankedTensor encoding。
@@ -1043,3 +1073,67 @@ unittests/Dialect/Frisk/Layout/
 6. 让一个双 consumer 用例选择共同布局或显式 conversion，并通过最小 lowering adapter 的正确性测试。
 
 这两个连续切片依次验证 MemRef storage binding、组合布局代数、SSA encoding、约束求解和 conversion 物化，避免布局代数、IR 迁移与完整 GEMM 同时失控。完成后再迁移 Gemm/Reduce 并接入 WGMMA/TMA 布局契约。
+
+## 17. M3 Task 15–16 当前实现边界
+
+Distributed SSA/use graph、双向 transpose relation、候选闭包后单调裁剪、
+以及按新增 conversion 数优先的有界求解已实现；细节和 Task 16 接口见
+[M3 Task 15 analysis contract](m3_task15_analysis.md)。
+
+- Bootstrap 上限仍为每连通分量 8 variables、每 domain 4 candidates；不静默截断。
+- `StorageAccess` 的正确性关系为 `S(D(h))`，coalescing 是 soft preference；
+  replicated store 的 lowering 必须选定唯一 deterministic owner。
+- SameLayout/Keep 保留 exact SSA encoding equality；Transpose 按 tensor axis
+  permutation 比较物理映射，并允许 source/destination 使用不同合法 output labels。
+- 当前支持非零 rank、静态 power-of-two bit-linear tensor tile；逻辑 extent 1
+  受 M1 禁止 named zero-bit dimension 的限制，rank 0 会在候选构造前明确拒绝。
+- `analysis-only` 完成 collect/solve/verify 且不改 IR；Task 16 已实现 SCF
+  if/for/while collection 和 ModuleOp-only detached transaction，一致物化
+  Tensor/SCF/function type。借用 graph/solution 的原始身份只在提交前有效；
+  staged `RelationsOnly` 验证将 consumer 固定为实际 operand encoding，不重新求解。
+  详细契约见 [M3 Task 16 materialization](m3_task16_materialization.md)。当前未知
+  tensor op、tensor call、external tensor signature 明确失败，不宣称完整 Distributed lowering。
+- Conversion analysis 限 single CTA；Task 17 的测试 lowering 对不支持的
+  execution-topology 组合明确诊断，不将 Convertible 当作可执行性证明。
+
+## 18. M3 Task 17 conversion cleanup 与测试 adapter
+
+`frisk-optimize-layout-conversions` 已实现 canonical map 检查下的 identity/
+inverse elimination，以及 A→B→C 合并。所有 replacement 必须保持 exact SSA
+result type；即使 canonical map 相同，encoding attribute 不同也不能直接
+替换 SSA value。多 consumer 的中间 conversion 保留其其他用途。
+
+`frisk-test-lower-layout-conversions` 是测试专用的静态 BitLinear adapter：
+
+- 共享 planner 计算 `R = rightInverse(Dsrc) compose Ddst` 并逐 owner 验证。
+  按 named input 独立编解码 register/lane/warp/warp_group；缺失 input 维度
+  视为 replication。逻辑坐标按 tensor row-major 分配 scratch，不直接使用
+  concatenated matrix bits 作为多维线性地址。
+- source owner 优先 same-thread、其次 same-warp replica，物理 thread/register
+  字典序打破平局；无本地 replica 时使用已证明的 R owner。Shared writer 是
+  独立的每 logical element 唯一 global right-inverse owner，不按各 consumer
+  的 local replica 选择重复写入。单线程 register permutation 不生成 shuffle。
+- Shuffle 对每个候选 source register 在全部 lane 无条件执行，再根据目标
+  lane 的 source-register 请求选择。i8/i16/i32/i64、f16/bf16/f32/f64 均通过
+  bit-preserving i32 word 传输；窄类型 zero-extend/truncate，64-bit 拆两 word
+  后重组，float 只 bitcast，不做数值转换。
+- 跨 warp 使用 gpu.func workgroup attribution、唯一 owner 条件 store、
+  无条件 gpu.barrier、每 destination logical slot load；使用原 dtype、自然
+  alignment、独立 buffer。默认 49152-byte **adapter budget** 可配置，不代表
+  SM90 硬件最大值。计入既有 attribution、buffer 间 padding 和全部新增 buffer；
+  dynamic/non-attributed workgroup storage 明确拒绝，避免未计入的共享容量。
+- 仅接受 single-block gpu.func kernel 的直接 entry-block conversion，要求
+  已知 `[32*warp*warp_group,1,1]` block size、lane=32、CTA=1、两端 execution
+  topology 相同（register extent 可不同）。拒绝 nested if/loop、CFG、缺失
+  block metadata、跨 CTA/cluster、unsupported dtype 和 adapter 大小上限。
+  单 CTA 是每 tile 的通信范围，不限制不同 block 独立执行同一 kernel。
+- 所有计划/容量检查先于 IR mutation；失败不改变 module。公开 representation
+  仍为 encoded RankedTensor。内部 `unrealized_conversion_cast` 的 Tensor↔
+  per-thread Vector 桥接只定义测试 ABI；M6 runtime harness 必须以真实 tile
+  load/store transport 替换并消除这些桥接，才能进入可执行 GPU lowering。
+
+M3 只验收 ownership/payload oracle、合法 GPU-level IR 和明确 unsupported
+diagnostics，不宣称已完成 GPU runtime correctness 或性能验证。动态 encoded
+tensor 和缺 coverage map 已被 M1 verifier 先拒绝；planner 的 programmatic
+negative tests 独立覆盖其拒绝边界。详细接口及命令见
+[Task 17 implementation](m3_task17_conversions.md)。

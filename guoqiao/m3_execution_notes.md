@@ -69,12 +69,19 @@ build/bin/frisk-opt test/Transforms/multi-consumer-layout.mlir \
 git diff f65c54d..HEAD --check
 ```
 
-The implementation remains in the local `feature/m3-distributed-layout` branch
-at `/home/baopeihua/frisk/.worktrees/m3-distributed-layout`; the main code remains
-at `f65c54d` (M3 documentation is also mirrored there as of 2026-09-11).
+The implementation and synchronized documentation were merged locally from
+`feature/m3-distributed-layout` (`be71d91`) into `main` on 2026-09-11.
+The primary checkout `/home/baopeihua/frisk` now contains M3 code, not only
+mirrored documentation. Pre-merge documentation edits were committed on both
+branches; the main checkout's table/checkbox formatting was preserved.
+The automatic merge had no conflicts. A fresh build in the main checkout
+passed 27 lit, 74 unit, 4 CTest cases and the multi-consumer inference/cleanup
+gate; running inference/cleanup again produced byte-identical output.
 M4 begins with Task 18; formal CostVector and executable
 GPU/runtime gates remain M5/M6. Pre-existing negative-unit diagnostic output
 and CMake CMP0116 configuration noise are nonblocking maintenance items, not
 test failures or M3 regressions.
 
-No M3 integration into main or remote publication has been performed.
+No remote publication has been performed. The development branch/worktree is
+retained with its build and review artifacts; the main checkout is the working
+location for subsequent tasks.

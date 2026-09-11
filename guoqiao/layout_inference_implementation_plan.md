@@ -10,7 +10,7 @@
 
 > **执行状态（2026-09-10）：M0–M3 已完成并通过 Gate；M3 逐任务及整分支审查通过。下一未完成里程碑为 M4（Task 18）。**
 
-> **工作区说明（文档同步于 2026-09-11）：上述 M3 状态对应 `feature/m3-distributed-layout` 的已验收实现（`642c30b`），代码位于 `/home/baopeihua/frisk/.worktrees/m3-distributed-layout`。主工作区 `/home/baopeihua/frisk` 的 `main` 代码仍停留在 M2（`f65c54d`）；同步本文及其引用说明文档不等于合并 M3 代码。M3 构建/测试命令应在该 M3 工作树执行。**
+> **工作区说明（本地合并于 2026-09-11）：M3 实现及同步文档已从 `feature/m3-distributed-layout`（`be71d91`，实现验收基线 `642c30b`）合入本地 `main`。可直接在主工作区 `/home/baopeihua/frisk` 构建和运行下列 M3 测试；合并后的 27 lit、74 unit、4 CTest 及重复推断检查均通过。本次未推送远端。**
 
 ## Global Constraints
 
@@ -1989,7 +1989,7 @@ build/bin/frisk-opt test/Transforms/multi-consumer-layout.mlir \
   -frisk-infer-layouts -frisk-optimize-layout-conversions -verify-each
 ```
 
-以上命令从已配置的 M3 工作树 build 运行；`--split-input-file` 可选。该 lit 用例还
+以上命令从已配置的主工作区 build 运行；`--split-input-file` 可选。该 lit 用例还
 检查活跃 consumer 及再次 infer/cleanup 后的输出逐字一致。构建命令同时刷新 CTest
 的四个 legacy test target；`check-frisk` 不代替执行独立的 layout unit 二进制。
 

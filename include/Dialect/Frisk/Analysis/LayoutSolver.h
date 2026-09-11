@@ -21,6 +21,15 @@ public:
                         Operation *source, StringRef rule);
   LogicalResult same(LayoutVarID lhs, LayoutVarID rhs, Operation *source,
                      StringRef rule);
+  LayoutVarID getOrCreateDistributedUse(OpOperand &use);
+  LogicalResult transform(LayoutVarID src, LayoutVarID dst,
+                          Attribute coordinateTransform, Operation *source,
+                          StringRef rule);
+  LogicalResult storageAccess(LayoutVarID distributed, LayoutVarID storage,
+                              AccessKind access, Operation *source,
+                              StringRef rule);
+  LogicalResult convertible(LayoutVarID src, LayoutVarID dst, OpOperand &use,
+                            bool existing = false);
 
   std::optional<LayoutVarID>
   lookup(Value value, LayoutKind kind = LayoutKind::Storage) const;
@@ -31,11 +40,19 @@ private:
   LayoutConstraintGraph &graph;
   DenseMap<Value, LayoutVarID> storageVariablesByValue;
   DenseMap<Value, LayoutVarID> distributedVariablesByValue;
+  DenseMap<OpOperand *, LayoutVarID> distributedVariablesByUse;
   uint64_t nextStableOrdinal = 0;
 };
 
-FailureOr<LayoutConstraintGraph>
-collectLayoutConstraints(Operation *root, LayoutTarget &target);
+enum class LayoutCollectionMode { InitializeCandidates, RelationsOnly };
+
+FailureOr<LayoutConstraintGraph> collectLayoutConstraints(
+    Operation *root, LayoutTarget &target,
+    LayoutCollectionMode mode = LayoutCollectionMode::InitializeCandidates);
+
+/// Extends the graph before finalization, including structured Tensor joins.
+LogicalResult collectDistributedLayoutConstraints(
+    Operation *root, LayoutConstraintGraph &graph, LayoutConstraintBuilder &builder);
 
 LogicalResult propagateStrict(LayoutConstraintGraph &graph);
 LogicalResult propagateCommonToFixedPoint(LayoutConstraintGraph &graph);

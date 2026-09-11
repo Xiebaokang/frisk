@@ -20,9 +20,15 @@ add_frisk_library(FriskLegacyLayoutAdapter
 add_frisk_library(FriskLayoutAnalysis
   LayoutPropagation.cpp
   LayoutVerifier.cpp
+  LayoutRelations.cpp
+  DistributedLayoutConstraints.cpp
 
   LINK_LIBS PUBLIC
   FriskAnalysis
   FriskIR
   MLIRIR
+  MLIRFuncDialect
+  MLIRLinalgDialect
+  MLIRSCFDialect
+  MLIRTensorDialect
 )

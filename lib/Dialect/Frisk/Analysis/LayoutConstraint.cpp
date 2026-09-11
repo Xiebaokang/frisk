@@ -14,6 +14,8 @@ StringRef stringifyConstraintKind(ConstraintKind kind) {
   switch (kind) {
   case ConstraintKind::SameLayout:
     return "same-layout";
+  case ConstraintKind::Convertible:
+    return "convertible";
   case ConstraintKind::TransformLayout:
     return "transform-layout";
   case ConstraintKind::RequireEncoding:
@@ -73,8 +75,7 @@ LayoutConstraintID LayoutConstraintGraph::addConstraint(
 
 static bool isCommutativeConstraint(ConstraintKind kind) {
   return kind == ConstraintKind::SameLayout ||
-         kind == ConstraintKind::AliasLayout ||
-         kind == ConstraintKind::StorageAccess;
+         kind == ConstraintKind::AliasLayout;
 }
 
 static std::string getStableAttributeText(Attribute attribute) {
@@ -127,6 +128,12 @@ LogicalResult LayoutConstraintGraph::finalize(Location loc) {
     std::string rhsEncoding = getStableAttributeText(rhs.requiredEncoding);
     if (lhsEncoding != rhsEncoding)
       return lhsEncoding < rhsEncoding;
+    if (lhs.stableUseKey != rhs.stableUseKey)
+      return lhs.stableUseKey < rhs.stableUseKey;
+    auto lhsTransform = getStableAttributeText(lhs.coordinateTransform);
+    auto rhsTransform = getStableAttributeText(rhs.coordinateTransform);
+    if (lhsTransform != rhsTransform)
+      return lhsTransform < rhsTransform;
     const LayoutProvenance &lhsProv = provenances[lhs.provenance];
     const LayoutProvenance &rhsProv = provenances[rhs.provenance];
     return std::tie(lhsProv.rule, lhsProv.reason) <
@@ -152,6 +159,17 @@ LogicalResult LayoutConstraintGraph::verifyInvariants(Location loc) const {
   }
 
   for (const LayoutConstraint &constraint : constraints) {
+    if ((constraint.kind == ConstraintKind::Convertible ||
+         constraint.kind == ConstraintKind::TransformLayout ||
+         constraint.kind == ConstraintKind::StorageAccess) &&
+        constraint.vars.size() != 2)
+      return emitError(loc) << "binary layout relation requires two endpoints";
+    if (constraint.kind == ConstraintKind::Convertible &&
+        (!constraint.use || constraint.stableUseKey.empty()))
+      return emitError(loc) << "convertible relation requires a stable SSA use";
+    if (constraint.kind == ConstraintKind::TransformLayout &&
+        !constraint.coordinateTransform)
+      return emitError(loc) << "transform relation requires a permutation";
     if (constraint.strength == ConstraintStrength::Hard &&
         constraint.vars.empty())
       return emitError(loc) << "hard layout constraint '"
@@ -220,6 +238,14 @@ LayoutConstraintGraph::lookupVariable(StringRef stableName) const {
   if (it == variables.end())
     return std::nullopt;
   return it->id;
+}
+
+std::optional<LayoutVarID>
+LayoutConstraintGraph::lookupVariable(Value value) const {
+  for (const LayoutVar &var : variables)
+    if (var.value && var.value == value)
+      return var.id;
+  return std::nullopt;
 }
 
 void LayoutConstraintGraph::print(raw_ostream &os) const {

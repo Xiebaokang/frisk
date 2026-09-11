@@ -38,6 +38,42 @@ bool hasNonReturnUser(LayoutViewOp op) {
   });
 }
 
+LogicalResult verifyStaticWholeTile(Operation *op, ShapedType memref,
+                                    RankedTensorType tensor,
+                                    StringRef mismatchMessage) {
+  if (!memref.hasStaticShape() || !tensor.hasStaticShape())
+    return op->emitOpError()
+           << op->getName().stripDialect()
+           << " requires static source and result shapes";
+  if (memref.getShape() != tensor.getShape() ||
+      memref.getElementType() != tensor.getElementType())
+    return op->emitOpError(mismatchMessage);
+
+  Attribute encoding = tensor.getEncoding();
+  if (!encoding)
+    return success();
+  auto distributed = dyn_cast<DistributedEncodingAttr>(encoding);
+  if (!distributed)
+    return op->emitOpError(
+        "tensor encoding must be a DistributedEncodingAttr");
+  return distributed.verifyForType(tensor, op->getLoc());
+}
+
+bool haveEquivalentDistributedEncodings(RankedTensorType lhs,
+                                        RankedTensorType rhs) {
+  auto lhsEncoding =
+      dyn_cast_or_null<DistributedEncodingAttr>(lhs.getEncoding());
+  auto rhsEncoding =
+      dyn_cast_or_null<DistributedEncodingAttr>(rhs.getEncoding());
+  if (!lhsEncoding || !rhsEncoding ||
+      lhsEncoding.getTopology() != rhsEncoding.getTopology() ||
+      lhsEncoding.getReplication() != rhsEncoding.getReplication())
+    return false;
+  FailureOr<Attribute> lhsMap = lhsEncoding.getCanonicalMap(lhs);
+  FailureOr<Attribute> rhsMap = rhsEncoding.getCanonicalMap(rhs);
+  return succeeded(lhsMap) && succeeded(rhsMap) && *lhsMap == *rhsMap;
+}
+
 } // namespace
 
 Value LayoutViewOp::getViewSource() { return getSource(); }
@@ -68,6 +104,79 @@ LogicalResult LayoutViewOp::canonicalize(LayoutViewOp op,
     return failure();
 
   rewriter.modifyOpInPlace(op, [&] { op->setOperand(0, inner.getSource()); });
+  return success();
+}
+
+LogicalResult TileLoadOp::verify() {
+  return verifyStaticWholeTile(
+      getOperation(), cast<MemRefType>(getSource().getType()),
+      cast<RankedTensorType>(getResult().getType()),
+      "source memref and result tensor must have identical static shape and "
+      "element type");
+}
+
+LogicalResult TileStoreOp::verify() {
+  auto valueType = cast<RankedTensorType>(getValue().getType());
+  auto targetType = cast<MemRefType>(getTarget().getType());
+  if (!valueType.hasStaticShape() || !targetType.hasStaticShape())
+    return emitOpError("tile_store requires static value and target shapes");
+  if (valueType.getShape() != targetType.getShape() ||
+      valueType.getElementType() != targetType.getElementType())
+    return emitOpError(
+        "value tensor and target memref must have identical static shape and "
+        "element type");
+  Attribute encoding = valueType.getEncoding();
+  if (!encoding)
+    return success();
+  auto distributed = dyn_cast<DistributedEncodingAttr>(encoding);
+  if (!distributed)
+    return emitOpError("tensor encoding must be a DistributedEncodingAttr");
+  return distributed.verifyForType(valueType, getLoc());
+}
+
+LogicalResult ConvertLayoutOp::verify() {
+  auto sourceType = cast<RankedTensorType>(getSource().getType());
+  auto resultType = cast<RankedTensorType>(getResult().getType());
+  if (sourceType.getShape() != resultType.getShape() ||
+      sourceType.getElementType() != resultType.getElementType())
+    return emitOpError(
+        "source and target must have identical shape and element type");
+
+  auto sourceEncoding =
+      dyn_cast_or_null<DistributedEncodingAttr>(sourceType.getEncoding());
+  auto resultEncoding =
+      dyn_cast_or_null<DistributedEncodingAttr>(resultType.getEncoding());
+  if (!sourceEncoding || !resultEncoding)
+    return emitOpError("source and target must use DistributedEncodingAttr");
+  if (failed(sourceEncoding.verifyForType(sourceType, getLoc())) ||
+      failed(resultEncoding.verifyForType(resultType, getLoc())))
+    return failure();
+  return success();
+}
+
+LogicalResult ConvertLayoutOp::canonicalize(ConvertLayoutOp op,
+                                            PatternRewriter &rewriter) {
+  auto sourceType = cast<RankedTensorType>(op.getSource().getType());
+  auto resultType = cast<RankedTensorType>(op.getResult().getType());
+  if (sourceType == resultType &&
+      haveEquivalentDistributedEncodings(sourceType, resultType)) {
+    rewriter.replaceOp(op, op.getSource());
+    return success();
+  }
+
+  auto inner = op.getSource().getDefiningOp<ConvertLayoutOp>();
+  if (!inner)
+    return failure();
+  auto innerSourceType =
+      cast<RankedTensorType>(inner.getSource().getType());
+  if (innerSourceType == resultType &&
+      haveEquivalentDistributedEncodings(innerSourceType, resultType)) {
+    rewriter.replaceOp(op, inner.getSource());
+    return success();
+  }
+  // Composition preserves the exact requested result type. A semantic map
+  // identity with distinct attribute spelling is not an SSA type identity.
+  rewriter.replaceOpWithNewOp<ConvertLayoutOp>(op, resultType, inner.getSource());
   return success();
 }
 

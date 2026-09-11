@@ -52,8 +52,23 @@ public:
         solveBootstrapLayoutGraph(*graph, *target);
     if (failed(solution) ||
         failed(verifySolvedLayoutGraph(*graph, *solution, *target,
-                                      getOperation().getLoc())) ||
-        failed(materializeLayouts(getOperation(), *graph, *solution)) ||
+                                      getOperation().getLoc()))) {
+      signalPassFailure();
+      return;
+    }
+    if (dumpAnalysis) {
+      graph->print(llvm::errs());
+      for (const auto &var : graph->getVariables())
+        if (var.kind == LayoutKind::Distributed)
+          llvm::errs() << "distributed domain " << var.stableName << ": "
+                       << var.candidates.size() << '\n';
+      llvm::errs() << "conversions: " << solution->conversions.size() << '\n';
+      for (const auto &edge : solution->conversions)
+        llvm::errs() << "convert " << graph->getConstraint(edge.constraint).stableUseKey << '\n';
+    }
+    if (analysisOnly)
+      return;
+    if (failed(materializeLayouts(getOperation(), *graph, *solution)) ||
         failed(verifyMaterializedLayouts(getOperation(), *target)))
       signalPassFailure();
   }

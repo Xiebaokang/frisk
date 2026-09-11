@@ -1,4 +1,5 @@
 #include "Dialect/Frisk/Analysis/LayoutSolver.h"
+#include "Dialect/Frisk/Analysis/LayoutRelations.h"
 
 #include <functional>
 
@@ -15,16 +16,6 @@ namespace mlir::frisk {
 
 namespace {
 
-bool compatible(ConstraintKind kind, Attribute lhs, Attribute rhs) {
-  if (kind == ConstraintKind::StorageAccess) {
-    auto lhsStorage = dyn_cast<StorageLayoutAttr>(lhs);
-    auto rhsStorage = dyn_cast<StorageLayoutAttr>(rhs);
-    if (lhsStorage && rhsStorage)
-      return lhsStorage.getMap() == rhsStorage.getMap();
-  }
-  return lhs == rhs;
-}
-
 void updateState(LayoutVar &var) {
   if (var.candidates.empty())
     var.state = LayoutState::Conflict;
@@ -34,12 +25,14 @@ void updateState(LayoutVar &var) {
     var.state = LayoutState::CandidateSet;
 }
 
-bool filterCompatible(LayoutVar &var, ArrayRef<LayoutCandidate> other,
-                      ConstraintKind kind) {
+bool filterCompatible(LayoutConstraintGraph &graph, LayoutVar &var,
+                      LayoutVarID otherID, ArrayRef<LayoutCandidate> other,
+                      const LayoutConstraint &relation) {
   size_t oldSize = var.candidates.size();
   llvm::erase_if(var.candidates, [&](const LayoutCandidate &candidate) {
     return llvm::none_of(other, [&](const LayoutCandidate &otherCandidate) {
-      return compatible(kind, candidate.value, otherCandidate.value);
+      return layoutRelationCompatible(graph, relation, var.id, candidate.value,
+                                      otherID, otherCandidate.value);
     });
   });
   updateState(var);
@@ -86,8 +79,8 @@ LogicalResult applyEqualityConstraint(LayoutConstraintGraph &graph,
       LayoutVar &rhs = graph.getVariable(constraint.vars[rhsIndex]);
       SmallVector<LayoutCandidate> lhsSnapshot(lhs.candidates);
       SmallVector<LayoutCandidate> rhsSnapshot(rhs.candidates);
-      changed |= filterCompatible(lhs, rhsSnapshot, constraint.kind);
-      changed |= filterCompatible(rhs, lhsSnapshot, constraint.kind);
+      changed |= filterCompatible(graph, lhs, rhs.id, rhsSnapshot, constraint);
+      changed |= filterCompatible(graph, rhs, lhs.id, lhsSnapshot, constraint);
       if (lhs.state == LayoutState::Conflict ||
           rhs.state == LayoutState::Conflict) {
         lhs.state = LayoutState::Conflict;
@@ -100,9 +93,7 @@ LogicalResult applyEqualityConstraint(LayoutConstraintGraph &graph,
 }
 
 bool isEqualityConstraint(ConstraintKind kind) {
-  return kind == ConstraintKind::SameLayout ||
-         kind == ConstraintKind::AliasLayout ||
-         kind == ConstraintKind::StorageAccess;
+  return isSupportedLayoutRelation(kind);
 }
 
 bool isWholeTileStaticCopy(CopyOp copy) {
@@ -124,28 +115,6 @@ Value getLayoutViewAliasRoot(Value value) {
   while (auto view = value.getDefiningOp<LayoutViewOp>())
     value = view.getSource();
   return value;
-}
-
-FailureOr<Attribute> projectCandidate(ConstraintKind kind,
-                                      Attribute candidate,
-                                      const LayoutVar &targetVar) {
-  if (kind == ConstraintKind::SameLayout ||
-      kind == ConstraintKind::AliasLayout)
-    return candidate;
-  if (kind != ConstraintKind::StorageAccess)
-    return failure();
-  auto sourceStorage = dyn_cast<StorageLayoutAttr>(candidate);
-  auto targetType = dyn_cast<MemRefType>(targetVar.shapedType);
-  if (!sourceStorage || !targetType)
-    return failure();
-  std::optional<attr::MemorySpace> targetSpace =
-      getFriskMemorySpace(targetType);
-  if (!targetSpace || *targetSpace == attr::MemorySpace::Local)
-    return failure();
-  return Attribute(StorageLayoutAttr::get(
-      targetType.getContext(), sourceStorage.getMap(),
-      MemorySpaceAttr::get(targetType.getContext(), *targetSpace),
-      sourceStorage.getAlignment(), sourceStorage.getVectorGranularity()));
 }
 
 } // namespace
@@ -248,8 +217,11 @@ LayoutVarID LayoutConstraintBuilder::getOrCreate(Value value,
     return found->second;
 
   std::string name = getStableValueName(value, kind, nextStableOrdinal++);
-  Operation *anchor = value.getDefiningOp<LayoutViewOp>();
+  Operation *anchor = value.getDefiningOp();
+  if (!anchor)
+    anchor = cast<BlockArgument>(value).getOwner()->getParentOp();
   LayoutVarID id = graph.addVariable(kind, value.getType(), name, anchor);
+  graph.getVariable(id).value = value;
   variablesByValue.try_emplace(value, id);
   return id;
 }
@@ -261,6 +233,68 @@ LayoutVarID LayoutConstraintBuilder::getOrCreateStorageVar(Value anchor) {
 LayoutVarID
 LayoutConstraintBuilder::getOrCreateDistributedVar(Value value) {
   return getOrCreate(value, LayoutKind::Distributed);
+}
+
+static std::string getStableUseKey(OpOperand &use) {
+  // Stable owner block/operation ordinals and operand slot, never use-list order.
+  Operation *owner = use.getOwner();
+  unsigned ordinal = 0;
+  for (Operation &op : *owner->getBlock()) {
+    if (&op == owner) break;
+    ++ordinal;
+  }
+  return getQualifiedSymbolName(owner) + "/b" +
+      std::to_string(getBlockOrdinal(findEnclosingSymbol(owner), owner->getBlock())) +
+      "/o" + std::to_string(ordinal) + "/use" +
+      std::to_string(use.getOperandNumber());
+}
+
+LayoutVarID LayoutConstraintBuilder::getOrCreateDistributedUse(OpOperand &use) {
+  auto found = distributedVariablesByUse.find(&use);
+  if (found != distributedVariablesByUse.end())
+    return found->second;
+  LayoutVarID src = getOrCreateDistributedVar(use.get());
+  std::string key = getStableUseKey(use);
+  LayoutVarID dst = graph.addVariable(LayoutKind::Distributed, use.get().getType(),
+                                      key, use.getOwner());
+  graph.getVariable(dst).use = &use;
+  distributedVariablesByUse[&use] = dst;
+  (void)convertible(src, dst, use);
+  return dst;
+}
+
+LogicalResult LayoutConstraintBuilder::convertible(
+    LayoutVarID src, LayoutVarID dst, OpOperand &use, bool existing) {
+  auto id = graph.addConstraint(ConstraintKind::Convertible,
+      ConstraintStrength::Hard, {src, dst}, use.getOwner(), "tensor-use",
+      existing ? "existing explicit conversion" : "keep common layout or convert");
+  auto &constraint = graph.getConstraints()[id];
+  constraint.use = &use;
+  constraint.existingConversion = existing;
+  constraint.stableUseKey = getStableUseKey(use);
+  return success();
+}
+
+LogicalResult LayoutConstraintBuilder::transform(
+    LayoutVarID src, LayoutVarID dst, Attribute permutation,
+    Operation *source, StringRef rule) {
+  auto id = graph.addConstraint(ConstraintKind::TransformLayout,
+      ConstraintStrength::Hard, {src, dst}, source, rule,
+      "coordinate permutation preserves hardware owners");
+  graph.getConstraints()[id].coordinateTransform = permutation;
+  return success();
+}
+
+LogicalResult LayoutConstraintBuilder::storageAccess(
+    LayoutVarID distributed, LayoutVarID storage, AccessKind access,
+    Operation *source, StringRef rule) {
+  auto id = graph.addConstraint(ConstraintKind::StorageAccess,
+      ConstraintStrength::Hard, {distributed, storage}, source, rule,
+      "storage address is S(D(h)); replicated stores elect one owner");
+  graph.getConstraints()[id].access = access;
+  graph.addConstraint(ConstraintKind::Preference, ConstraintStrength::Soft,
+      {distributed, storage}, source, "coalesced-access", "prefer coalescing");
+  return success();
 }
 
 LogicalResult LayoutConstraintBuilder::require(LayoutVarID var,
@@ -300,7 +334,8 @@ LayoutConstraintBuilder::lookup(Value value, LayoutKind kind) const {
 }
 
 FailureOr<LayoutConstraintGraph>
-collectLayoutConstraints(Operation *root, LayoutTarget &target) {
+collectLayoutConstraints(Operation *root, LayoutTarget &target,
+                         LayoutCollectionMode mode) {
   LayoutConstraintGraph graph;
   LayoutConstraintBuilder builder(graph);
   DenseMap<Value, SmallVector<LayoutVarID>> viewsBySource;
@@ -379,10 +414,13 @@ collectLayoutConstraints(Operation *root, LayoutTarget &target) {
                         ConstraintStrength::Soft, {src, dst}, copy,
                         "coalesced-copy", "prefer coalesced storage access");
   });
+  failedCollection |= failed(collectDistributedLayoutConstraints(root, graph, builder));
   if (failedCollection)
     return failure();
   if (failed(graph.finalize(root->getLoc())))
     return failure();
+  if (mode == LayoutCollectionMode::RelationsOnly)
+    return graph;
 
   auto projectCandidatesToFixedPoint = [&]() {
     bool addedCandidate;
@@ -400,8 +438,8 @@ collectLayoutConstraints(Operation *root, LayoutTarget &target) {
               continue;
             LayoutVar &targetVar = graph.getVariable(targetID);
             for (const LayoutCandidate &sourceCandidate : sourceCandidates) {
-              FailureOr<Attribute> projected = projectCandidate(
-                  constraint.kind, sourceCandidate.value, targetVar);
+              FailureOr<Attribute> projected = projectLayoutCandidate(
+                  graph, constraint, sourceID, sourceCandidate.value, targetID);
               if (failed(projected) ||
                   llvm::any_of(targetVar.candidates,
                                [&](const LayoutCandidate &known) {
@@ -453,6 +491,9 @@ collectLayoutConstraints(Operation *root, LayoutTarget &target) {
           "layout enumerated by the target model");
       var.candidates.push_back(recorded);
     }
+    // Initialize one relation domain at a time. A transpose-connected domain
+    // receives transformed alternatives, not another independent default set.
+    projectCandidatesToFixedPoint();
   }
   projectCandidatesToFixedPoint();
 
@@ -460,7 +501,8 @@ collectLayoutConstraints(Operation *root, LayoutTarget &target) {
     llvm::stable_sort(var.candidates,
                       [](const LayoutCandidate &lhs,
                          const LayoutCandidate &rhs) {
-      return lhs.stableOrdinal < rhs.stableOrdinal;
+      return std::make_pair(lhs.stableOrdinal, layoutCandidateKey(lhs.value)) <
+             std::make_pair(rhs.stableOrdinal, layoutCandidateKey(rhs.value));
     });
     updateState(var);
     if (var.state == LayoutState::Conflict) {
@@ -507,6 +549,8 @@ LogicalResult propagateStrict(LayoutConstraintGraph &graph) {
 }
 
 LogicalResult propagateCommonToFixedPoint(LayoutConstraintGraph &graph) {
+  if (failed(propagateStrict(graph)))
+    return failure();
   bool changed;
   do {
     changed = false;
