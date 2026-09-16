@@ -89,6 +89,20 @@ def StorageLayoutAttr
     : AttrDef<Frisk_Dialect, "StorageLayout", [LayoutEncodingAttrInterface]> {
   let cppNamespace = "::mlir::frisk";
   let summary = "A logical-tile to byte/bit storage encoding";
+  let description = [{
+    Maps live logical coordinates to (byte_offset, bit_offset) relative to the
+    proven common storage root's aligned pointer. Descriptor offsets are
+    included in that map, never added to its output again. Alias verification
+    checks the root accessible interval and coordinate/bit-interval agreement.
+
+    Alignment denotes a root-pointer guarantee, not alignment of every element.
+    A whole-root binding may declare an alignment precondition; a child binding
+    cannot strengthen its root guarantee. Vector granularity 1 is scalar/packed
+    baseline. Larger values require aligned scalar subdivisions or complete,
+    contiguous innermost-row vector chunks; projected candidates may weaken it.
+    These contextual properties are checked by layout analysis, not by the
+    attribute's context-free structural verifier alone.
+  }];
   let mnemonic = "storage";
   let parameters = (ins
     AttrParameter<"::mlir::Attribute", "canonical storage map">:$map,

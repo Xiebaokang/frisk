@@ -14,20 +14,6 @@
 namespace mlir::frisk {
 
 namespace {
-
-bool storageMapsAgree(StorageLayoutAttr lhs, StorageLayoutAttr rhs) {
-  return lhs && rhs && lhs.getMap() == rhs.getMap();
-}
-
-Value getLayoutViewAliasRoot(Value value) {
-  while (auto view = value.getDefiningOp<LayoutViewOp>())
-    value = view.getSource();
-  return value;
-}
-
-} // namespace
-
-namespace {
 struct ConversionSnapshot {
   unsigned operand;
   Attribute source;
@@ -247,63 +233,7 @@ LogicalResult materializeLayouts(Operation *root,
 
 LogicalResult verifyMaterializedLayouts(Operation *root,
                                         LayoutTarget &target) {
-  DenseMap<Value, StorageLayoutAttr> layoutByView;
-  DenseMap<Value, StorageLayoutAttr> layoutBySource;
-  bool valid = true;
-  root->walk([&](LayoutViewOp view) {
-    StorageLayoutAttr layout = view.getLayoutAttr();
-    if (!layout) {
-      view.emitOpError("unresolved storage layout for layout variable");
-      valid = false;
-      return;
-    }
-    LayoutVar var{0, LayoutKind::Storage, view.getResult().getType(), {},
-                  LayoutState::Resolved, "materialized-view", view};
-    if (failed(target.verifyCandidate(var, layout, view.getLoc()))) {
-      valid = false;
-      return;
-    }
-    auto type = cast<MemRefType>(view.getSource().getType());
-    FailureOr<uint64_t> required = getStorageFootprintBytes(layout, type);
-    FailureOr<uint64_t> capacity = getMemRefStaticCapacityBytes(type);
-    if (failed(required) || failed(capacity)) {
-      view.emitOpError(
-          "cannot prove storage layout footprint fits the underlying memref "
-          "type");
-      valid = false;
-      return;
-    }
-    if (*required > *capacity) {
-      view.emitOpError("storage layout requires ")
-          << *required << " bytes but underlying memref type provides "
-          << *capacity << " bytes";
-      valid = false;
-      return;
-    }
-    Value aliasRoot = getLayoutViewAliasRoot(view.getSource());
-    auto [it, inserted] = layoutBySource.try_emplace(aliasRoot, layout);
-    if (!inserted && it->second != layout) {
-      view.emitOpError("alias layout views have inconsistent bindings");
-      valid = false;
-    }
-    layoutByView[view.getResult()] = layout;
-  });
-  root->walk([&](CopyOp copy) {
-    StorageLayoutAttr src = layoutByView.lookup(copy.getSrc());
-    StorageLayoutAttr dst = layoutByView.lookup(copy.getDst());
-    if (!src || !dst) {
-      copy.emitOpError(
-          "unresolved storage layout for whole-tile copy operand");
-      valid = false;
-      return;
-    }
-    if (!storageMapsAgree(src, dst)) {
-      copy.emitOpError(
-          "materialized whole-tile copy storage maps are incompatible");
-      valid = false;
-    }
-  });
-  if (!valid || failed(verify(root))) return failure();
+  if (failed(verify(root))) return failure();
   auto graph = collectLayoutConstraints(root, target, LayoutCollectionMode::RelationsOnly);
   if (failed(graph)) return failure();
   LayoutSolution actual;
@@ -311,6 +241,8 @@ LogicalResult verifyMaterializedLayouts(Operation *root,
     Attribute encoding;
     if (var.kind == LayoutKind::Storage) {
       encoding = cast<LayoutViewOp>(var.anchor).getLayoutAttr();
+      if (!encoding)
+        return var.anchor->emitError("unresolved storage layout for materialized view");
     } else {
       Type type;
       if (var.value) type = var.value.getType();

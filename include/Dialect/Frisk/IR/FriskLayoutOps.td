@@ -9,6 +9,12 @@ def Frisk_LayoutViewOp : Frisk_Op<"layout_view", [
   let description = [{
     Creates a fully aliasing view of a memref and optionally binds a Frisk
     storage layout. The operation never allocates or moves data.
+    A binding uses root-relative byte/bit addresses. For a statically proven
+    cast/subview chain, compose logical coordinates with its offsets, positive
+    strides and rank reduction; do not add the view descriptor offset twice.
+    Same-root bindings agree on shared coordinates and may not map distinct
+    root elements to overlapping physical bit intervals. Unsupported alias
+    paths are diagnosed by layout inference rather than treated as new roots.
   }];
 
   let arguments = (ins

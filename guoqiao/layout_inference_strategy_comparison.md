@@ -4,9 +4,31 @@
 >
 > Frisk 目标平台：NVIDIA SM90/SM90a
 >
-> 审阅日期：2026-08-16
+> 首次审阅：2026-08-16；本次源码审计：2026-09-12
+>
+> 状态：M0–M3 与 M4 Task 18 已实现；Task 18 独立复审和 30 lit / 104 unit / 4 CTest 通过，尚未提交/合入 main。其余 M4 迁移尚未实施，跨规范化的契约生命周期限制见 §10 与实现计划 §18.9。
 >
 > 关联文档：[Frisk 布局推断系统设计方案](./layout_inference_design.md)、[GF(2) 与组合布局说明](./gf2_layout_guide.md)
+
+## 0. 审计基线、证据边界与维护约定
+
+本轮按用户要求先审计与设计，再确认实施。下表保留审计起点；Frisk Task 18 的实现增量另见 §6.1、§13 和实现计划 §18.9。上游比较仅指固定快照，不表示今后 main 的永久状态。
+
+| 项目 | 本轮源码快照 | 审计/验证范围 |
+| --- | --- | --- |
+| Frisk | `b120d06400a14a703a44dac1a37a0b38d8110935`，M3 合并后的 main | 读取新旧布局路径；本轮构建及 27 lit、74 unit、4 CTest 全部通过 |
+| TileLang | `5e149e31674658f94779c7d0c6039549a1853123`，2026-09-12 | 官方 main 获取后核对 HEAD；读取推断、代数、Op、reducer verifier 和测试；未运行其测试 |
+| Triton | `42c5e89c3871e1472968c92dd8e5c02d0b3dd40c`，2026-09-11（提交时区 -07:00） | 官方 main 获取后核对 HEAD；读取布局传播、SCF、代数、存储区域分析和测试；未运行其测试 |
+
+历史记录：2026-08-16 比较采用 TileLang `6623b12d232b343648a5ba99992e3e6f0d6376d2`。本轮逐项核对旧版本，区分“旧版已有”和“本区间新增”；旧快照保留为迁移回归参考，不再代替新版语义。Triton 原文使用浮动 main，无法据此证明具体机制在哪次提交首次出现；本轮只陈述固定新版已具备什么。
+
+维护规则：
+
+- 每个相关实现任务同步本文件和[实现计划](./layout_inference_implementation_plan.md)：版本、源码证据、行为取舍、测试、未完成项缺一不可。
+- “源码存在”“本轮测试通过”“设计目标”“性能/创新假设”分别标注；不得互相替代。
+- 上游升级必须记录旧/新 SHA 和行为变化；不能只替换链接就宣称差分 corpus 已更新。
+- 不采用“另一框架完全没有”作为创新证据；缺失结论限定到已审阅 pass/接口和支持子集。
+- 本轮没有 TileLang/Triton 运行实验、GPU benchmark 或端到端性能结论。上表 27/74/4 是 M3 基线；Task 18 的新增测试结果单独记录，不能混用。
 
 ## 1. 结论摘要
 
@@ -16,7 +38,7 @@
 TileLang = 以 Buffer 为中心的兼容布局闭包
 Triton   = 带 Encoding 的 Tensor SSA + 硬件锚点驱动的多轮布局改写
            + 显式 ConvertLayout 的插入、消除、提升与重计算
-Frisk    = MLIR 类型化的 Distributed/Storage 双域布局
+Frisk目标 = MLIR 类型化的 Distributed/Storage 双域布局
            + 全图约束传播 + 有限候选联合选择
            + 求解后显式物化 conversion
 ```
@@ -40,7 +62,7 @@ Frisk 的目标方案不是“以 Triton 为主、再复制 TileLang 的规则�
 
 > **表示层接近 Triton，传播阶段借鉴 TileLang，决策层与组合布局代数形成 Frisk 自己的架构。**
 
-这里所说的“创新”首先是可落地、可验证的编译器架构创新。只有在完整实现、差分测试和性能评测之后，才能进一步宣称算法或性能上的研究创新。
+这里所说的“创新”是待检验的架构假设，不是已证明的独创性或性能优势；当前完成度见 §6.1，验证与否证条件见 §10。
 
 ## 2. 比较前必须统一的概念
 
@@ -112,7 +134,7 @@ Frisk 使用 `MemRef` 保持可寻址存储语义，并在 allocation/layout vie
 
 ### 3.1 TileLang 总体流程
 
-以已审阅的 TileLang commit `6623b12d` 为基线，其 CUDA 主流程的关键顺序为：
+以本轮 TileLang `5e149e3` 为基线，以下仅列 CUDA 布局相关关键阶段（不是完整 pass 清单）：
 
 ```text
 High-level Tile IR
@@ -230,7 +252,7 @@ TileOperator 的 `InferLayout` 会根据：
 
 #### 阶段 2：common BFS fixed-point
 
-从所有 TileOp 开始，通过 Buffer use-list 反复调用 `InferLayout(kCommon)`；新布局会把相关 users 重新加入队列，直到没有更新。
+通过 Buffer use-list/worklist 调用 `InferLayout(kCommon)`；新布局及 reducer widening 会唤醒相关 users。不能据此断言所有事实更新都实现统一依赖唤醒：当前 containment 替换和 swizzle merge 分支并不统一重新入队全部 users，也未给所有 Layout 提供同一个有限格证明。
 
 此阶段主要寻找兼容布局闭包。已有布局与新布局相遇时会：
 
@@ -241,9 +263,9 @@ TileOperator 的 `InferLayout` 会根据：
 
 #### 阶段 3：free-mode
 
-对仍未完全解析的连通分量，TileLang 尝试让不同 Op 作为推断 root，执行 free-level 传播，并比较得到的寄存器数量；选择 replication/寄存器占用更小、且具有确定性 tie-break 的方案。
+对未完全解析的连通分量尝试不同 root 的 native plan，并为符合条件的 reducer root 增加 scalar candidate。新版 `RunOneAttempt` 隔离队列、layout map 与 cloned op 状态，失败候选不能污染下一次尝试。
 
-这已经不是简单的“第一个 Op 决定一切”，但候选空间和成本仍主要围绕 Buffer 兼容与 fragment register count，并不是一个把 conversion edge 作为变量的通用全图优化器。
+新版采用可插拔 `LayoutCostModel`：默认 `register-count` 先比较估计 spill traffic，再比较寄存器数；`tl.layout_cost_model="io-aware"` 为 opt-in，增加全局访问 bandwidth/issue 成本。I/O 模型利用 CuTe algebra 推导访问并采用 probe-then-prove，不能继续称 TileLang“只有寄存器启发式、没有访问代数或 I/O 成本”。它仍是有限 component attempt 评分，不是把任意 conversion placement 纳入的目标级全局最优求解。见 §15 固定源码。
 
 #### 阶段 4：alias finalize
 
@@ -251,7 +273,9 @@ TileOperator 的 `InferLayout` 会根据：
 
 - shape 相同则传播同一布局；
 - shape/dtype 不同则根据 storage bit ratio reshape；
-- 保证 alias group 的物理 storage footprint 一致。
+- 对支持的 full-buffer reshape/reinterpret 验证 storage bits 与映射兼容性。
+
+这不是任意 offset/strided slice 的统一证明：前端 `T.view/T.reshape` 重建同 data 的 Tensor，检查总 storage bits，但不复制 source 的 strides/elem_offset。same-data 分组也不等于逻辑坐标恒等。位宽感知 reshape、widening 的同线程/连续且对齐槽位证明在旧 `6623b12` 就已存在。
 
 ### 4.4 冲突处理
 
@@ -263,11 +287,22 @@ TileLang 主要通过“找到一个大家都能接受的 Buffer 布局”消除
 兼容              -> 合并/传播
 fragment containment -> 选择可包含的布局
 shared swizzle 可合并 -> 合并粒度
-free-mode 有可行 root -> 选择寄存器更少的 root
+free-mode 有可行 root -> 按所选 cost policy 比较 attempt
 仍不兼容           -> 编译期冲突或 unsupported
 ```
 
-### 4.5 优势与局限
+### 4.5 本轮确认的新机制与迁移影响
+
+- **PartialFragment**：区分未归约的 addend lanes 与同值 copy groups；相同 storage algebra 不代表相同 reduction 语义。普通 Fragment 的 replica 处理不能直接复用。
+- **Reducer 单调 widening**：`unset → narrow → wide`；strict annotation 冲突仍报错。dst-steering 决定哪个 Op 有首次提交无约束 dst 的权利，不是硬件 thread owner。
+- **作用域与控制流**：过滤含外层自由变量的 open fragment；reducer epoch verifier 新支持 serial/pipelined loop 与受限 conditional refinement，检查 loop/then/else/while 语境。这不是通用 SSA block-argument/yield join 求解，但也不能写成“不支持控制流”。
+- **Parallel**：free-mode 重访 frozen loop 时重新验证晚到约束；只读 broadcast 可退到 canonical fully replicated，written buffer 不能这样处理。
+- **Copy/GEMM/Reduce**：Copy/GEMM 部分 positional 参数迁到 annotations；GEMM 新增 definite read-before-write region 语义。传统 Reduce 的主要 src→dst/containment 规则并未因 reducer 更新而全面双向化。旧 Frisk Op 迁移必须按当前 API 和语义重审。
+- **逆映射**：新增 inverse round-trip 检查，可拒绝明确错误的逆；其有限域检查和 Unknown 处理有边界，不能称任意映射的完整反演证明。
+
+证据与现有测试入口见 §15；这里只审阅测试源码，没有执行 TileLang 测试。
+
+### 4.6 优势与局限
 
 优势：
 
@@ -303,7 +338,7 @@ shared memory 则通过可寻址的 memdesc/storage 类型和相应 encoding 表
 
 ### 5.2 TTIR 转 TTGIR：先给默认布局
 
-TTIR tensor 尚未带 GPU encoding。TypeConverter 为未编码的 `RankedTensorType` 添加默认 `BlockedEncodingAttr`；Dialect Conversion 在期望类型与已有类型不一致时，可以物化 `ConvertLayoutOp`。
+TypeConverter 保留已有 encoding，为未编码 `RankedTensorType` 添加默认 blocked encoding。当前 source materialization 可用 `UnrealizedConversionCastOp`，target materialization 使用 `ConvertLayoutOp`，二者不能混为同一路径。
 
 这一步建立的是合法、统一的初始 TTGIR，不代表已经得到整张图的最终最优布局。
 
@@ -339,7 +374,7 @@ TTIR tensor 尚未带 GPU encoding。TypeConverter 为未编码的 `RankedTensor
 当前实现的注释明确给出四步：
 
 1. 找出希望保留布局的 anchor ops；
-2. 从每个 anchor 向 descendants 传播 encoding；
+2. 从 tensor function arguments 和 anchor 的 tensor results 向 descendants 传播 encoding（无 result 的 store 虽可被判定为 anchor，却不直接成为 forward seed）；
 3. 一个 value 可能得到多个候选 encoding，随后解决冲突并在必要处插入 conversion；
 4. 按 dominance/structured-region 顺序重写 IR。
 
@@ -360,7 +395,17 @@ Triton 的 conversion 优化包含：
 
 > 把冲突显式化之后，能够使用 SSA、dominance、slice analysis 和 canonicalization 对 conversion 做系统优化。
 
-### 5.6 优势与局限
+### 5.6 Region、存储分析与代数的实际边界
+
+`RemoveLayoutConversions` 使用单调**增长**候选的 forward worklist；`SmallSetVector<Attribute, 8>` 中的 8 是 inline capacity，不是候选硬上限。随后还有独立的 rewrite、backward rematerialization/cleanup 循环，并非同一个有限域删减求解器。
+
+`scf.while` 已支持两套不同 arity/type 的 tuple：init/after-yield 对 before args；condition-forwarded values 对 after args/results，跳过 predicate。反向 rematerialization 对 while block args 和部分 loop results 仍有限制。不能把局部限制描述成 Triton 没有 while 支持。`getValueAs` 的转换可放在定义后，并非一律紧贴 operand use。
+
+当前 `BufferRegionAnalysis` 已区分 allocation frame、view offset 和精确 physical address sets；动态 index 可以形成合法 subbuffer 的 MAY 集合，未知 producer 提升为 Unknown。这些能力用于 memory effect、ConSan 与同步分析，**本轮未发现它参与 RemoveLayoutConversions 候选选择，不能将两者说成一个布局 solver**。
+
+`LinearLayout` 本体为 GF(2) 映射，且允许非单射以表达复制；pseudoinverse 选择规范代表不等于证明唯一 writer。Triton 的 `PaddedSharedEncoding` 已组合 padding 与 linear component，不能把 GF(2) 本体限制扩大为“Triton 无法表达 padding”。固定源码与静态测试见 §15。
+
+### 5.7 优势与局限
 
 优势：
 
@@ -382,17 +427,23 @@ Triton 的 conversion 优化包含：
 
 ### 6.1 当前实现状态与目标架构必须分开
 
-截至本文审阅时，Frisk 当前代码已经有：
+审计起点 Frisk `b120d06` 已完成 M0–M3，原文“LayoutInfer 是空壳”已经过时。下表加入用户确认后的 `feature/m4-task18` 增量，不代表 main 已合入：
 
-- 基于 `AffineMap` 的 `LayoutAttr`；
-- `LayoutInterface::inferLayout`；
-- Gemm、Reduce、Parallel 等局部推断代码；
-- `DenseMap<Value, Attribute>` 形式的推断状态；
-- 一部分 shared/fragment 布局构造工具。
+| 已有部件/功能 | 已核对实现 | 当前边界 |
+| --- | --- | --- |
+| 布局代数与属性 | GF(2) 矩阵、Affine/BitLinear/Product、LayoutProof、Distributed/Storage attrs | 代数库能力不等于所有 map/shape 已接入 pass；Unknown 不可作为硬证明 |
+| Storage 纵向切片 | layout_view、whole-tile Copy；Task 18 增加静态 cast/subview 坐标链、有限 origin 投影、全部同-root pairs 的 bit 区间证明 | 同 dtype/space、可静态证明；动态路径、reinterpret、一般 Product alias 投影保守拒绝；不引入隐藏 root assignment |
+| Distributed 纵向切片 | Tensor encoding、transpose/broadcast 等关系、tile_load/store、显式 conversion | 静态受限形状；bootstrap 每 component 至多 8 vars、每域至多 4 candidates，不是 M5 的通用全局搜索 |
+| 结构化控制流 | if/for/while 实际 use/slot 约束与转换物化；Task 18 显式带 kind/slot 的 region edges | 保留 while I/O 两套 tuple；回边仍允许 Convertible，不为制造缩域而改为相等约束 |
+| 约束求解/物化 | stable IDs、hard constraints、provenance、确定性有限枚举；Task 18 stable FIFO 删减及真实 degree 上界统计；detached module 原子提交 | 完整 CostVector/SM90 指令路径联合优化未实现；候选有限初始化不是通用大图最优解证明 |
+| 独立核验与测试 adapter | 从实际 IR 重建关系、singleton assignment 核验；受限 conversion lowering 测试 | 不是完整 WGMMA/TMA/mbarrier lowering，没有端到端性能优越性证据 |
+| 旧 Op 规则 | FriskOps/FriskOps_Reduce 的 legacy 方法仍在，adapter 提供受限语义回归 | 新 pass 尚未通过 Op interface 全面迁移 Copy/Fill/Parallel/GEMM/Reduce；Task 19–22 待实现 |
 
-但当前 `LayoutInfer.cpp` 仍基本是空 pass 壳，现有 register fragment 仍使用 MemRef 表达，也尚未具备本文所述的全图候选求解、类型化 Distributed encoding、Storage binding、显式 conversion 物化和完整 verifier。
+源码锚点：`LayoutAliasAnalysis.cpp` 的 root/坐标/bit 证明；`StorageAliasCandidates.cpp` 的有限 origins；`LayoutPropagation.cpp` 的 strict/common FIFO；`LayoutRelations.cpp` 的 AliasLayout 证明缓存；`DistributedLayoutConstraints.cpp` 的 SCF 规则；`MaterializeLayouts.cpp` 的实际值重绑和事务提交。上游证据见 §15。
 
-因此本节描述的是 **Frisk 需要实现的目标架构**，不是对当前完成度的描述。
+Task 18 对应的审计缺口已在实现分支处理：endpoint-owned 坐标 payload 随 ID remap；同-root 关系由邻接链改为全部 pairs；容量改查 root accessible bit span；RelationsOnly 在任何投影/枚举之前返回。此前 RelationsOnly seed 复制是模式契约缺口，不能倒推旧版已经发生错误验过；本次另有 actual verifier 非邻接冲突反例。
+
+审计 baseline：27 lit、74 unit、4 CTest 全通过。Task 18 新增 30 个 alias/region/integration 单元和 3 份 lit，最终 Gate 为 30/30 lit、104/104 unit、4/4 CTest；命令及边界见实现计划 §18.9。§6.2–6.5 仍是目标分解，不能整体当作现状；完整硬件 pipeline 超出当前范围。
 
 ### 6.2 表示层：Distributed 与 Storage 分离
 
@@ -604,7 +655,7 @@ conversion cleanup 只优化已经验证的选择，不能承担“修复错误�
 
 #### K. SM90 lowering
 
-目标流水线为：
+长期目标流水线为（不是当前可运行 pipeline，也不属于本计划完整指令 lowering 的交付承诺）：
 
 ```text
 frisk-normalize-layout-ir
@@ -630,19 +681,21 @@ frisk-normalize-layout-ir
 | 局部规则 | 每个 TileOperator 的 `InferLayout` | coalesce、dot/MMA、descriptor 等 target pass | Op constraint interface + SM90 rule library |
 | 全局状态 | `Map<Buffer, Layout>` | value → encoding candidates，类型直接携带结果 | LayoutVar domain + constraint/provenance graph |
 | 传播方式 | strict + BFS common + free root search | anchor → descendants propagation，多轮 pass | strict + 双向 fixed-point + component candidate solve |
-| 反向推断 | TileOp 可依据已知 buffer 推另一端 | anchor propagation/rematerialization 中发生 | 一等能力；consumer contract 可反推 producer/storage |
-| Alias/view | 同 data Var 的 Buffer group finalize | MLIR SSA/memdesc view 规则 | MLIR AliasAnalysis/ViewLike + storage graph |
+| 反向推断 | TileOp 可依据已知 buffer 推另一端 | inferSrcEncoding / backward rematerialization；SCF 穿越有边界 | 一等能力；consumer contract 可反推 producer/storage |
+| Alias/view | 同 data 分组、位宽感知 reshape，非任意 slice 证明 | memdesc view + 独立物理 BufferRegion 分析 | Task 18 显式坐标关系 + 全部同-root pairs 的 storage hard constraints；支持子集与 Unknown 明确 |
 | 多 consumer | 尽量找到一个共同 Buffer 布局 | 可保留局部不同 encoding，以 conversion 分隔 | 联合比较共享布局、边界 conversion、rematerialization |
 | 冲突处理 | containment、swizzle merge、free root；仍冲突则失败 | heuristic 选 encoding并插 conversion | hard conflict 诊断；soft conflict 进入全局候选选择 |
 | Conversion | 不是通用核心抽象 | 显式 ConvertLayout，随后多轮优化 | 显式且是求解变量；求解后统一物化 |
-| 成本重点 | 兼容性、replication/register count | pass-local hardware heuristic + conversion cleanup | 指令路径、访存、bank conflict、conversion、资源联合评估 |
-| Region/loop | TIR loop annotation 与 lowering | structured MLIR region 重写 | SCF 类型一致约束 + region fixed-point |
+| 成本重点 | 默认 spill/register；可选 I/O-aware component attempt 评分 | pass-local hardware heuristic + conversion cleanup | 指令路径、访存、bank conflict、conversion、资源联合评估（M5） |
+| Region/loop | TIR loop/annotation、reducer epoch 语境验证；非通用 SSA join 图 | if/for/while 正向传播/重写；while 区分双 tuple，反向 remat 有边界 | M3 SCF 语义 + Task 18 显式边与有限域收敛统计 |
 | 验证 | Analyzer/ICHECK/专用 validator | MLIR verifier + target-specific checks | MLIR verifier + 数学证书 + provenance diagnostic |
-| 代数 | PrimExpr/IndexMap/Layout/Fragment | encoding + LinearLayout/GF(2) 能力 | Affine outer × GF(2) inner canonical product |
+| 代数 | PrimExpr/IndexMap/Fragment/PartialFragment，部分 CuTe 访问代数 | encoding + LinearLayout；已有 padding/linear 组合 | Affine outer × GF(2) inner，实际支持范围见 §6.1 |
 | Target 耦合 | TileOp/layout 与 TVM CUDA lowering 紧密 | target-specific encoding/pass 较多 | 通用 solver 与 SM90 rule/adapter 分层 |
 | 默认失败策略 | 找不到共同布局时冲突 | 插 conversion 或 target fallback | 先全局选成本最低合法解；无普通解才受控 fallback |
 
 ## 8. 同一个 SM90 WGMMA 数据流在三者中的处理
+
+本节是机制示意；尤其 §8.3 为 Frisk 未来设计，不是本轮编译/运行结果。
 
 考虑：
 
@@ -664,7 +717,7 @@ global A/B
 3. Copy rule 将 shared layout 与 global copy/thread mapping 关联；
 4. epilogue 和 store consumer 尝试接受/传播同一 accumulator Buffer layout；
 5. 如果 fragment 关系可以 containment/replication 兼容，则选共同布局；
-6. free-mode 可以尝试不同 root，并倾向较少寄存器的结果；
+6. free-mode 比较 root attempts，按默认 spill/register 或 opt-in I/O-aware policy 评分；
 7. 如果 store 所需布局与 accumulator 布局无法兼容，也没有 Op-specific lowering 处理该差异，则发生冲突或走专门 fallback。
 
 这里的核心目标是：**尽量让一个 Buffer layout 同时满足整条链。**
@@ -736,72 +789,20 @@ solver 比较整条 critical path 的 WGMMA/TMA 命中、global transaction、ba
 - 接 autotuning：有限候选和稳定 cost key 已经形成清晰入口；
 - 做性能回归：可以按 candidate、conversion、register、bank conflict 输出统计，而不是只比较最终 PTX。
 
-## 10. Frisk 的创新点
+## 10. 差异化假设与可核验创新边界
 
-### 10.1 双域统一约束图
+双域区分、GF(2)、padding、显式 conversion、alias/view、while、fixed-point、候选评分本身都不是 Frisk 独有。TileLang 的 PartialFragment/位宽视图与 Triton 的 BufferRegion/PaddedSharedEncoding 进一步说明：不能通过省略对方能力建立“创新”。
 
-Frisk 既不把 register value 当成 Buffer，也不让 StorageLayoutAttr 同时承担线程 ownership。Distributed graph 和 Storage alias graph 分开建模，却通过 load/store/copy/WGMMA/TMA constraint 在同一个 component solve 中联合选择。
+| 假设 | 与固定参考实现比较的具体点 | Frisk 当前状态 | 验证/否证条件 |
+| --- | --- | --- | --- |
+| H1：坐标化 alias 与 SSA region 关系在同一 hard-constraint 图内协作 | 对比 TileLang buffer 兼容闭包及 Triton 分离的布局传播/物理区域分析；比较作用范围，不说对方没有坐标分析 | Task 18 坐标 alias/显式边已编码，支持受限静态域；尚无性能结论 | 偏移/步长/降秩、三视图冲突、真实回边重调度；actual-only verifier 无隐藏 assignment。Tensor/storage 经访问关系协作，不代表任意跨域组合全覆盖 |
+| H2：可审计的有限域终止与冲突解释 | 公开冻结候选数、实际删除数、queue pops、degree 上界，关联 seed→alias/region→冲突 | Task 18 worklist/stats、finite origins、proof cache 已编码 | 插入顺序扰动下 assignment/统计相同；重复 pass IR 相同；真实事件逐项对账，Unknown 拒绝。该性质是当前受限实现的工程差异，不是对上游整体的否定 |
+| H3：组合代数扩大受支持布局域而保持证明一致 | 比较具体 Affine/GF(2) 组合域与 TileLang IndexMap/CuTe、Triton padded/linear 的交集及差集 | M1 代数已有，pass 子集受限 | 同坐标语义、coverage/injectivity/owner 与反例；非零 offset XOR 必须正确处理 carry。若只换一种文本表达，不构成新增能力 |
+| H4：布局、指令路径和 conversion placement 联合选择改善结果 | 与固定 pipeline/attempt policy 比较合法候选及最终代价，不假定全局最优 | M3 只最少新增转换；M5 成本/路径选择未实现 | 固定硬件/输入/编译选项，报告 runtime、访存、bank、寄存器/共享内存和编译时间；超出计划回退阈值或无收益则不宣称性能优势 |
 
-这是 Frisk 最重要的架构创新：**语义分离，决策联合。**
+语义差分是验证方法，不是独创性结论。旧 Frisk/旧 TileLang 仅为已知正确子集的回归 oracle；新版机制、历史 bug 修正须用独立的坐标/owner/address 不变量及行为变更记录核验，不能为了“和旧版一致”保留错误。Task 28 将建立新版固定 corpus，目前尚未生成或运行。
 
-### 10.2 “仿射外层 × GF(2) 位线性内层”的规范化布局代数
-
-创新不在于单独使用 Affine 或 GF(2)，而在于为两者规定清晰边界、组合规则和 canonical form：
-
-- 外层处理不规则 shape 和物理地址结构；
-- 内层处理硬件位级分布和 XOR；
-- compose 后可以证明等价、coverage、injectivity 与 ownership；
-- 同一数学布局的不同构造路径可 canonicalize 到稳定表示。
-
-它同时避免 TileLang/TVM 表达的体系绑定，也避免 encoding class 不断特化却缺少统一数学等价判定。
-
-### 10.3 布局、指令路径和 conversion placement 联合选择
-
-传统实现容易分成：先选 layout，再插 conversion，再清理。Frisk 把以下变量放进同一次 component selection：
-
-- WGMMA/TMA/cp.async/SIMT 路径；
-- distributed ownership；
-- shared swizzle/padding；
-- conversion 放在哪条 SSA edge；
-- 是否 rematerialize/replicate；
-- register/shared/occupancy 成本。
-
-这不是承诺求出理论全局最优，而是在有限、经过 hard pruning 的 SM90 候选域中做可控的全局比较。
-
-### 10.4 可解释推断
-
-每个候选和剪枝动作保留 provenance：
-
-```text
-候选从哪个 Op/target rule 产生
--> 经过哪些关系传播
--> 被哪条 hard constraint 删除
--> conversion 为什么保留
--> 最终 assignment 为什么胜出
-```
-
-验证失败输出实际坐标反例或冲突链，而不是只触发 assertion。这使布局系统可以测试、调试和长期演进。
-
-### 10.5 语义差分而不是实现依赖
-
-Frisk 固定 TileLang 参考 commit，将小 tile 的：
-
-- `(thread, register) -> logical coordinate`；
-- `logical coordinate -> shared bit offset`；
-- coverage、replication、owner、bank；
-
-做语义差分。Frisk 可以选择与 TileLang 文本不同但数学等价、或成本更低的布局，不迁移 TIRX 类型和内部 solver。
-
-### 10.6 创新边界
-
-以下内容不能只凭设计文档宣称已经实现：
-
-- 全局选择一定优于 Triton heuristic；
-- 组合代数一定产生更快代码；
-- conversion 一定比 Triton 更少；
-- 编译时间一定可控。
-
-它们必须由 layout corpus、SM90 lowering 检查、runtime correctness、Nsight 指标和对照 benchmark 证明。Frisk 的创新目标是创造更好的决策空间和工程边界，而不是为了形式创新牺牲性能。
+本阶段实现 H1/H2 的受限 Task 18 切片并提供可复查测试，不扩展 GEMM/Reduce、cost solver、硬件 lowering，也不承诺本轮已经证明研究创新。whole-root alignment 前置契约若被 Pure/DCE 删除，后续 actual verifier 会保守拒绝；`infer → canonicalize → infer` 的证据生命周期限制已由回归记录，跨任意规范化的 durable contract 留待 Task 22。
 
 ## 11. Frisk 架构决策
 
@@ -897,29 +898,20 @@ Frisk 固定 TileLang 参考 commit，将小 tile 的：
 - 与手写/TileLang/Triton baseline 稳定回退的候选不能默认开启；
 - 任何性能结论必须在固定 shape、dtype、stage、clock/测量协议下比较。
 
-## 13. 对现有设计文档的修订建议
+## 13. 2026-09-12 审计决策记录
 
-[layout_inference_design.md](./layout_inference_design.md) 当前 Stage G 把 conversion 纳入 CostVector，但 Stage H 又写成“只有不存在零转换可行解时才允许松弛”。两者会导致策略歧义。
+| 证据/缺口 | 决策 | 对应任务与状态 |
+| --- | --- | --- |
+| TileLang bit-aware alias/widening 旧版已有；same data 不足以表达任意 slice | 采用 storage-bit/owner 不变量，调整为显式坐标关系；拒绝直接 union 为布局相等 | Task 18 已编码；dtype reinterpret 本阶段拒绝 |
+| TileLang 新 PartialFragment、dst-steering、epoch 语境扩展与 annotations ABI | 迁移前逐 Op 建新旧行为表；区分同值 replica 和 partial addend，区分读/写规则 | Task 19–21 后续设计输入，不在本轮实现 |
+| Triton while 两套 tuple 已有，backward remat 有局限 | 保留 Frisk M3 两套 tuple；显式记录 region edges，不扩大转换移动权限 | Task 18 已编码，真实 SCF 回归保留 Convertible |
+| Triton BufferRegion 已建模物理区域，但不是布局候选 solver | 借鉴 root/frame/地址集合与 Unknown；适配到 Frisk alias hard relation | Task 18 已编码；不照搬 memdesc 的专用 same-encoding 限制 |
+| Frisk Attr==、邻接 alias 链、root capacity 与地址原点约定不足 | 共同 root 地址契约、逐对坐标/bit 区间证明，处理非相邻重叠和非预期碰撞 | Task 18 实现分支已修复，并有先失败后通过的集成用例 |
+| Frisk 增长 closure 与多轮扫描尚无统计契约 | 有限候选初始化与单调删减分开；stable worklist、真实 degree 统计 | Task 18 已编码；Strict/Common 逐项账本、冲突与确定性测试 |
+| 原比较称 pass 空壳、成本模型只有寄存器，或把目标写成完成 | 本轮修正完成度和固定证据，创新改成待检验假设 | 本文与实现计划已同步 |
+| 旧文档曾对 conversion 普通候选/失败后 fallback 有歧义 | 维持计划现有决策：conversion 为普通候选，controlled fallback 仅处理普通域无解 | 历史问题已在现行设计/计划澄清，不再列为待修订缺陷 |
 
-建议后续实现前统一为：
-
-1. Stage F 同时生成无 conversion、显式 conversion 和 rematerialization 候选；
-2. Stage G 对它们进行端到端联合选择；
-3. conversion 是强成本项，但不是绝对禁止项；
-4. Stage H 只负责 ordinary candidate domain 无解后的 replication/padding/instruction fallback；
-5. Stage J 根据已选 edge 物化 conversion 并做 cleanup。
-
-换言之：
-
-```text
-错误策略：先强制寻找零 conversion，失败后才考虑 conversion
-
-推荐策略：零 conversion 与有 conversion 都是合法方案
-          -> 在满足硬约束的前提下比较端到端成本
-          -> 求解后才物化选中的 conversion
-```
-
-这个修订不会让 Frisk 退化成“到处插 conversion”的 Triton 简化版。相反，它使 compatibility 成为强偏好，同时保留为了 WGMMA/TMA、coalescing 或 bank-conflict 收益而进行受控转换的能力。
+[Task 18 详细设计、验收矩阵与实现记录](./layout_inference_implementation_plan.md#task-18-完成-aliasview-与-region-graph)保存了先审计设计、用户确认、红灯测试、实现与复审的过程。复审补强向量地址保证、对齐依据 provenance 和 region/图 ID 不变量；长期文档、公共属性/Op 注释同步，push/merge 仍须用户另行指示。
 
 ## 14. 最终结论
 
@@ -947,18 +939,33 @@ Frisk 的价值不是单独“比 TVM 更好”或“比 Triton 更新”，而�
 
 ### TileLang
 
-- [TileLang CUDA pipeline（固定审计 commit）](https://github.com/tile-ai/tilelang/blob/6623b12d232b343648a5ba99992e3e6f0d6376d2/tilelang/cuda/pipeline.py)
-- [TileLang LayoutInference（固定审计 commit）](https://github.com/tile-ai/tilelang/blob/6623b12d232b343648a5ba99992e3e6f0d6376d2/src/transform/layout_inference.cc)
-- [TileLang layout 实现目录](https://github.com/tile-ai/tilelang/tree/6623b12d232b343648a5ba99992e3e6f0d6376d2/src/layout)
+- [TileLang CUDA pipeline（固定审计 commit）](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/tilelang/cuda/pipeline.py)
+- [TileLang LayoutInference（固定审计 commit）](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/src/transform/layout_inference/layout_inference.cc)
+- [TileLang layout 实现目录](https://github.com/tile-ai/tilelang/tree/5e149e31674658f94779c7d0c6039549a1853123/src/layout)
+
+源码定位与静态测试（以下均已审阅，未执行上游测试）：
+
+- [alias / reducer widening / attempt 调度](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/src/transform/layout_inference/layout_inference.cc#L311)：`propagate_alias`、`RunOneAttempt`。
+- [PartialFragment](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/src/layout/layout.h#L256)、[reinterpret/reshape 与 inverse 检查](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/src/layout/layout.cc#L140)、[前端 view/reshape](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/tilelang/language/customize.py#L60)。
+- [代价接口](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/src/transform/layout_inference/layout_cost_model.h#L38)、[代价实现](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/src/transform/layout_inference/layout_cost_model.cc)、[默认 policy](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/src/config.h#L38)。
+- [epoch 语境验证](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/src/transform/verify_reducer_epoch.cc#L104)、[Parallel 规则](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/src/op/parallel.cc#L331)。
+- [Copy 新 ABI](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/src/op/copy.cc#L619)、[CUDA Copy 区域规则](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/src/cuda/op/copy.cc#L584)、[GEMM 读写/契约](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/src/op/gemm.cc#L164)、[传统 Reduce](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/src/op/reduce.cc#L195)。
+- [位宽 view 测试](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/testing/python/language/test_tilelang_language_view.py)、[reducer v2 测试](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/testing/python/language/test_tilelang_language_reducer_v2.py)、[attempt 隔离测试](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/testing/python/transform/test_tilelang_transform_reducer_scalar_candidates.py)、[推断/成本测试](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/testing/python/transform/test_tilelang_transform_layout_inference.py)、[inverse 测试](https://github.com/tile-ai/tilelang/blob/5e149e31674658f94779c7d0c6039549a1853123/testing/python/layout/test_tilelang_layout_inverse.py)。
+- [历史 LayoutInference（6623b12，仅作新旧比较）](https://github.com/tile-ai/tilelang/blob/6623b12d232b343648a5ba99992e3e6f0d6376d2/src/transform/layout_inference.cc)。
 
 ### Triton
 
-- [TTIR → TTGIR TypeConverter](https://github.com/triton-lang/triton/blob/main/lib/Conversion/TritonToTritonGPU/TritonGPUConversion.cpp)
-- [Coalesce](https://github.com/triton-lang/triton/blob/main/lib/Dialect/TritonGPU/Transforms/Coalesce.cpp)
-- [AccelerateMatmul](https://github.com/triton-lang/triton/blob/main/lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp)
-- [RemoveLayoutConversions](https://github.com/triton-lang/triton/blob/main/lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp)
-- [LinearLayout](https://github.com/triton-lang/triton/blob/main/include/triton/Tools/LinearLayout.h)
-- [NVIDIA backend pipeline](https://github.com/triton-lang/triton/blob/main/third_party/nvidia/backend/compiler.py)
+- [TTIR → TTGIR TypeConverter](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/lib/Conversion/TritonToTritonGPU/TritonGPUConversion.cpp)
+- [Coalesce](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/lib/Dialect/TritonGPU/Transforms/Coalesce.cpp)
+- [AccelerateMatmul](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp)
+- [RemoveLayoutConversions](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp)
+- [LinearLayout](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/include/triton/Tools/LinearLayout.h)
+- [NVIDIA backend pipeline](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/third_party/nvidia/backend/compiler.py)
+
+- [while forward 与 conflict heuristic](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp#L287)、[backward slice 限制](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/lib/Dialect/TritonGPU/Transforms/Utility.cpp#L900)。
+- [BufferRegion 契约](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/include/triton/Analysis/BufferRegion.h#L39)、[物理地址与 view 分析](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/lib/Analysis/BufferRegion.cpp)、[ConSan 使用点](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/lib/Dialect/TritonInstrument/IR/Utility.cpp#L698)、[Membar 使用点](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/lib/Analysis/Membar.cpp#L38)。
+- [PaddedSharedEncoding](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/include/triton/Dialect/TritonGPU/IR/TritonGPUAttrDefs.td#L208)、[memdesc verifier](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/lib/Dialect/TritonGPU/IR/Ops.cpp#L579)。
+- [while/转换静态测试](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/test/TritonGPU/combine.mlir#L1896)、[物理布局 alias 测试](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/test/Analysis/test-buffer-region-layout-alias.mlir)、[动态/重解释 alias 测试](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/test/Analysis/test-buffer-region-alias.mlir)、[LinearLayout 单测](https://github.com/triton-lang/triton/blob/42c5e89c3871e1472968c92dd8e5c02d0b3dd40c/unittest/Tools/LinearLayoutTest.cpp)。
 
 ### MLIR
 
@@ -972,7 +979,14 @@ Frisk 的价值不是单独“比 TVM 更好”或“比 Triton 更新”，而�
 ### Frisk 当前代码
 
 - [LayoutAttr](../include/Dialect/Frisk/IR/FriskAttributes.td)
-- [LayoutInterface](../include/Dialect/Frisk/IR/FriskInterfaces.td)
+- [新布局 Op/Attr 接口入口](../include/Dialect/Frisk/IR/FriskLayoutInterfaces.h)（接口定义存在不等于全部 Op model 已迁移）
 - [当前 LayoutInfer pass](../lib/Dialect/Frisk/Transforms/LayoutInfer.cpp)
 - [当前 Op 局部布局逻辑](../lib/Dialect/Frisk/IR/FriskOps.cpp)
 - [当前 Reduce 布局逻辑](../lib/Dialect/Frisk/IR/FriskOps_Reduce.cpp)
+
+- [布局属性](../include/Dialect/Frisk/IR/FriskLayoutAttrs.td)、[代数/证明](../include/Dialect/Frisk/Analysis/LayoutAlgebra.h)。
+- [约束图](../include/Dialect/Frisk/Analysis/LayoutConstraint.h)、[传播/alias root](../lib/Dialect/Frisk/Analysis/LayoutPropagation.cpp)、[关系核验](../lib/Dialect/Frisk/Analysis/LayoutRelations.cpp)。
+- [SCF 与 Tensor 约束](../lib/Dialect/Frisk/Analysis/DistributedLayoutConstraints.cpp)、[求解 verifier](../lib/Dialect/Frisk/Analysis/LayoutVerifier.cpp)、[原子物化/实际 IR 核验](../lib/Dialect/Frisk/Transforms/MaterializeLayouts.cpp)。
+- [SCF 回归](../test/Transforms/materialize-scf.mlir)、[传播单测](../unittests/Dialect/Frisk/Layout/LayoutPropagationTest.cpp)。
+
+本地链接用于后续维护；上述“当前实现”结论固定到 Frisk `b120d06`，不能用之后的文件内容反推此次已实现范围。

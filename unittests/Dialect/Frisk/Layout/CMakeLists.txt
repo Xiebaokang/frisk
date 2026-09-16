@@ -1,4 +1,7 @@
 add_unittest(FriskUnitTests FriskLayoutUnitTests
+  AliasRegionTest.cpp
+  LayoutAliasAnalysisTest.cpp
+  StorageAliasIntegrationTest.cpp
   LayoutConversionPlanTest.cpp
   BitLinearLayoutTest.cpp
   GF2MatrixTest.cpp
@@ -32,6 +35,7 @@ target_link_libraries(FriskLayoutUnitTests
   MLIRLinalgDialect
   MLIRTensorDialect
   MLIRSCFDialect
+  MLIRMemRefDialect
   MLIRIR
   MLIRParser
 )

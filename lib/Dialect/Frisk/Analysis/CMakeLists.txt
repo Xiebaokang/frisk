@@ -4,6 +4,7 @@ add_frisk_library(FriskAnalysis
 
   LINK_LIBS PUBLIC
   MLIRIR
+  MLIRSCFDialect
 )
 
 # The migration adapter depends on both the standalone algebra and concrete
@@ -18,6 +19,8 @@ add_frisk_library(FriskLegacyLayoutAdapter
 )
 
 add_frisk_library(FriskLayoutAnalysis
+  LayoutAliasAnalysis.cpp
+  StorageAliasCandidates.cpp
   LayoutPropagation.cpp
   LayoutVerifier.cpp
   LayoutRelations.cpp
@@ -31,4 +34,5 @@ add_frisk_library(FriskLayoutAnalysis
   MLIRLinalgDialect
   MLIRSCFDialect
   MLIRTensorDialect
+  MLIRMemRefDialect
 )

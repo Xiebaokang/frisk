@@ -4,6 +4,41 @@
 #include "llvm/ADT/STLExtras.h"
 
 namespace mlir::frisk {
+const StorageAliasFootprint &getStorageAliasFootprint(
+    const LayoutConstraintGraph &graph, LayoutVarID id, Attribute candidate) {
+  auto &cache = graph.getAliasFootprintCache();
+  auto key = LayoutConstraintGraph::AliasCandidateKey{id, candidate};
+  auto found = cache.find(key);
+  if (found != cache.end()) return found->second;
+  StorageAliasFootprint footprint;
+  auto encoding = dyn_cast_or_null<StorageLayoutAttr>(candidate);
+  const auto &info = graph.getVariable(id).storageAlias;
+  if (info && encoding)
+    footprint = buildStorageAliasFootprint(*info, encoding);
+  else
+    footprint.proof = {ProofStatus::Unknown, {}, "missing coordinate alias metadata or storage encoding"};
+  ++graph.getCandidatePreparationStatistics().footprintEvaluations;
+  return cache.try_emplace(key, std::move(footprint)).first->second;
+}
+
+LayoutProof proveAliasLayoutRelation(const LayoutConstraintGraph &graph,
+                                    LayoutVarID lhs, Attribute a,
+                                    LayoutVarID rhs, Attribute b) {
+  if (rhs < lhs) { std::swap(lhs, rhs); std::swap(a, b); }
+  auto key = LayoutConstraintGraph::AliasPairKey{{lhs, a}, {rhs, b}};
+  auto &cache = graph.getAliasPairCache();
+  auto found = cache.find(key);
+  if (found != cache.end()) return found->second;
+  // Populate both before taking references: DenseMap insertion may rehash.
+  (void)getStorageAliasFootprint(graph, lhs, a);
+  (void)getStorageAliasFootprint(graph, rhs, b);
+  auto proof = proveStorageAliasFootprints(
+      getStorageAliasFootprint(graph, lhs, a), getStorageAliasFootprint(graph, rhs, b));
+  ++graph.getCandidatePreparationStatistics().pairProofEvaluations;
+  cache.try_emplace(key, proof);
+  return proof;
+}
+
 std::string layoutCandidateKey(Attribute value) {
   std::string key;
   llvm::raw_string_ostream(key) << value;
@@ -104,8 +139,15 @@ FailureOr<Attribute> projectLayoutCandidate(
     const LayoutConstraintGraph &graph, const LayoutConstraint &relation,
     LayoutVarID source, Attribute candidate, LayoutVarID target) {
   const LayoutVar &dst = graph.getVariable(target);
+  if (relation.kind == ConstraintKind::AliasLayout) {
+    auto encoding = dyn_cast<StorageLayoutAttr>(candidate);
+    const auto &src = graph.getVariable(source).storageAlias;
+    if (!encoding || !src || !dst.storageAlias) return failure();
+    auto projected = projectStorageAliasCandidate(*src, encoding, *dst.storageAlias);
+    if (failed(projected)) return failure();
+    return Attribute(*projected);
+  }
   if (relation.kind == ConstraintKind::SameLayout ||
-      relation.kind == ConstraintKind::AliasLayout ||
       relation.kind == ConstraintKind::Convertible)
     return candidate;
   if (relation.kind == ConstraintKind::TransformLayout)
@@ -132,6 +174,9 @@ bool layoutRelationCompatible(const LayoutConstraintGraph &graph,
                               LayoutVarID lhsID, Attribute lhs,
                               LayoutVarID rhsID, Attribute rhs) {
   const LayoutVar &a = graph.getVariable(lhsID), &b = graph.getVariable(rhsID);
+  if (relation.kind == ConstraintKind::AliasLayout)
+    return proveAliasLayoutRelation(graph, lhsID, lhs, rhsID, rhs).status ==
+           ProofStatus::Proven;
   if (relation.kind == ConstraintKind::TransformLayout) {
     auto destination = dyn_cast<DistributedEncodingAttr>(rhs);
     if (!destination)

@@ -12,5 +12,10 @@ FailureOr<Attribute> projectLayoutCandidate(
     const LayoutConstraintGraph &graph, const LayoutConstraint &relation,
     LayoutVarID source, Attribute candidate, LayoutVarID target);
 std::string layoutCandidateKey(Attribute value);
+const StorageAliasFootprint &getStorageAliasFootprint(
+    const LayoutConstraintGraph &graph, LayoutVarID id, Attribute candidate);
+LayoutProof proveAliasLayoutRelation(const LayoutConstraintGraph &graph,
+                                    LayoutVarID lhs, Attribute a,
+                                    LayoutVarID rhs, Attribute b);
 } // namespace mlir::frisk
 #endif
