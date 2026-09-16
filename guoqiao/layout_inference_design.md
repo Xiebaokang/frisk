@@ -4,7 +4,7 @@
 > 日期：2026-08-16
 > 范围：NVIDIA SM90/SM90a；布局推断、布局验证与布局物化
 > 核心选择：Local/Register Tile 使用 `RankedTensorType + EncodingAttr`，Shared/Global 保持 MemRef，由统一约束系统连接分布式布局与存储布局
-> 实施状态（2026-09-10）：M0–M3 已完成并通过 Gate、逐任务及整分支审查。Storage 与 Distributed Tensor 均形成 collect → solve → materialize → verify 闭环，conversion 支持静态单 CTA 测试降低；下一阶段为 M4，可执行 GPU 运行验收仍属 M6。
+> 实施状态（2026-09-16）：M0–M3 及 M4 Task 18 的坐标 alias、显式 region edges 与单调 worklist 已实现；Task 18 独立复审与 30 lit / 104 unit / 4 CTest 通过，已按用户授权提交并合入本地 main，未推送。其余 M4 Op 迁移尚未实施，可执行 GPU 运行验收仍属 M6。实测、已知边界及集成记录见实现计划 §18.9–18.10。
 
 ## 1. 结论先行
 
@@ -71,7 +71,7 @@ Frisk 应采用已经确认的 MLIR-native 双域 IR 架构，并进行以下重
 - `frisk-infer-layouts` 缺少 target 属性时按 `sm_90` bootstrap 默认值处理；若显式给出 target，则只接受 `sm90/sm_90/sm90a/sm_90a`，其他 target 在构造候选前拒绝。
 - materialized verifier 会枚举静态 logical domain，验证每个元素的 bit range 不重叠，并证明最大地址不超过底层 MemRef strided/affine type 表达的静态容量；无法证明时保守拒绝。
 - `gemm/copy/fill/reduce` 的 MemoryEffect 已修正；M2 collector 目前只接收两个 operand 都由 `layout_view` 锚定的静态 whole-tile Copy，其他 Copy 明确诊断 unsupported。
-- M2 alias group 覆盖任意深度、零变换的 `layout_view` chain；`memref.cast`、`subview` 等 transform-aware alias 归入 M4 的统一 AliasAnalysis/region 传播。
+- M2 alias group 覆盖零变换 `layout_view` chain；M4 Task 18 扩展为同 dtype/space 静态 cast/subview 坐标关系，包括正 stride、offset、降秩。不同参数的 MayAlias 不是 MustAlias，也不推断 NoAlias。
 - Parallel 内的递归推断只覆盖部分操作，没有形成统一的 Op Interface 调度。
 - Storage binding 已进入 Frisk IR，但推断结果还没有完整进入 Frisk → NVGPU/NVVM 的 conversion pipeline，因此当前布局正确并不等于最终代码质量正确。
 
@@ -199,7 +199,15 @@ Shared/Global 仍是 MemRef，但不能把所有 shared XOR layout 直接塞进 
   : memref<64x64xbf16, #frisk.shared>
 ```
 
-`frisk.layout_view` 必须实现 `ViewLikeOpInterface`，不分配新内存；它为同一底层 MemRef 的不同逻辑 tile/view 提供唯一 SSA layout anchor。M2 沿零变换的 `layout_view` chain 合并 alias；M4 再由 AliasAnalysis 覆盖 `memref.cast`、`subview` 等带变换的 view，确保所有 alias 的 storage layout 一致。
+`frisk.layout_view` 实现 `ViewLikeOpInterface`，不分配新内存；它为实际 MemRef view 提供 SSA layout anchor。Task 18 使用 `LayoutAliasAnalysis` 规范化同 dtype/space 静态 cast/subview，并对共同 root 的全部实际 endpoints 逐对验证；一致性不是 Attr 相等，也不是把局部重叠关系直接 union。
+
+Task 18 的公共地址契约：`S_v(x)` 相对于共同 root 的 aligned pointer。`T_v` 将 view 坐标映射到 root；已经包含偏移的 map 不能再次加 descriptor offset。所有元素的物理 bit 区间须位于 root descriptor 保证的 `[lowerBit, upperBit)`，同 root 坐标同地址，不同坐标不得碰撞。root offset 非零时，不可利用 inaccessible prefix。没有 hidden root LayoutVar；actual verifier 仅用实际绑定覆盖域的联合一致性，不能补造未绑定 root 的唯一布局。
+
+alignment 是 root pointer 保证：allocation/global 属性或显式 whole-root binding 前置契约可以提供依据，child 声明不能倒推更强保证。vector=1 为 scalar/packed 基线，较大 vector 要检查实际对齐和连续完整的逻辑行块；投影可降低推断保证，硬绑定不静默修改。
+
+whole-root 前置契约有 IR 生命周期：未使用的 Pure binding 可能被 canonicalize/DCE 删除。Task 18 只保证 actual IR 中仍有证据时通过验证；删除证据后必须保守报错，不恢复隐藏契约。跨任意规范化的 durable contract 留待 Task 22；需要该能力的 pipeline 目前应保留 binding 或使用 allocation/global 的显式对齐依据。
+
+Storage origins 在删减前有限初始化，每个 `(origin, endpoint)` 最多访问一次；切片只可投影到自身已覆盖且有唯一逆像的域，不得逆推未观察部分。Region edges 保留 M3 while 输入/输出两套 tuple，引用既有转换关系。Strict/Common 的 FIFO/inQueue worklist 仅由实际缩域唤醒，并公开删除、pop、degree 上界；RelationsOnly 不枚举、不投影、不求候选闭包。
 
 Global MemRef 的默认物理布局直接复用 strided/affine layout；只有 tile permutation、packed/sub-byte 或特殊访问需要 `StorageLayoutAttr`。
 

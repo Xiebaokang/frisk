@@ -52,7 +52,8 @@ LogicalResult emitSolverLimit(const LayoutVar &var, StringRef detail) {
          << ": " << detail;
 }
 
-LogicalResult verifyStorageCapacity(const LayoutVar &var,
+LogicalResult verifyStorageCapacity(const LayoutConstraintGraph &graph,
+                                    const LayoutVar &var,
                                     Attribute candidate) {
   if (var.kind != LayoutKind::Storage)
     return success();
@@ -62,6 +63,12 @@ LogicalResult verifyStorageCapacity(const LayoutVar &var,
   if (!type || !storage)
     return emitError(loc) << "storage solution for " << var.stableName
                           << " has an incompatible type or encoding";
+  if (var.storageAlias) {
+    const auto &proof = getStorageAliasFootprint(graph, var.id, candidate).proof;
+    if (proof.status == ProofStatus::Proven) return success();
+    return emitError(loc) << "storage alias proof failed for " << var.stableName
+                          << ": " << proof.reason;
+  }
   FailureOr<uint64_t> required = getStorageFootprintBytes(storage, type);
   FailureOr<uint64_t> capacity = getMemRefStaticCapacityBytes(type);
   if (failed(required) || failed(capacity))
@@ -275,7 +282,7 @@ LogicalResult verifySolvedLayoutGraph(const LayoutConstraintGraph &graph,
     if (failed(target.verifyCandidate(var, found->second,
                                       getVariableLoc(var))))
       return failure();
-    if (failed(verifyStorageCapacity(var, found->second)))
+    if (failed(verifyStorageCapacity(graph, var, found->second)))
       return failure();
   }
   for (const LayoutConstraint &constraint : graph.getConstraints()) {
@@ -297,6 +304,15 @@ LogicalResult verifySolvedLayoutGraph(const LayoutConstraintGraph &graph,
     llvm::raw_string_ostream stream(chain);
     if (succeeded(graph.printProvenanceChain(constraint.provenance, stream)))
       diagnostic.attachNote(loc) << chain;
+    if (constraint.kind == ConstraintKind::AliasLayout) {
+      auto proof = proveAliasLayoutRelation(graph, constraint.vars[0],
+          solution.assignments.lookup(constraint.vars[0]), constraint.vars[1],
+          solution.assignments.lookup(constraint.vars[1]));
+      std::string coordinate;
+      llvm::raw_string_ostream os(coordinate);
+      llvm::interleaveComma(proof.counterexample, os);
+      diagnostic.attachNote(loc) << proof.reason << "; coordinate [" << coordinate << "]";
+    }
     return failure();
   }
   return success();

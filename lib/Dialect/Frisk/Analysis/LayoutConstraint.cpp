@@ -7,8 +7,37 @@
 #include "llvm/ADT/STLExtras.h"
 
 #include "mlir/IR/Diagnostics.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 
 namespace mlir::frisk {
+
+void PropagationPhaseStatistics::print(StringRef phase, raw_ostream &os) const {
+  if (!ran) return;
+  os << "propagation " << phase << " initial=" << initialCandidates
+     << " final=" << finalCandidates << " deleted=" << deletedCandidates
+     << " changes=" << domainChanges << " pops=" << queuePops
+     << " initial-constraints=" << initialConstraints
+     << " enqueues=" << enqueues << " max-queue=" << maximumQueue
+     << " pop-bound=" << popUpperBound
+     << " static-pop-bound=" << staticPopUpperBound << "\n";
+  os << "domain-changes " << phase << " [";
+  llvm::interleaveComma(changesByVariable, os);
+  os << "]\n";
+}
+
+StringRef stringifyRegionLayoutEdgeKind(RegionLayoutEdgeKind kind) {
+  switch (kind) {
+  case RegionLayoutEdgeKind::IfYield: return "if-yield";
+  case RegionLayoutEdgeKind::ForInit: return "for-init";
+  case RegionLayoutEdgeKind::ForBackedge: return "for-backedge";
+  case RegionLayoutEdgeKind::ForResult: return "for-result";
+  case RegionLayoutEdgeKind::WhileInit: return "while-init";
+  case RegionLayoutEdgeKind::WhileBackedge: return "while-backedge";
+  case RegionLayoutEdgeKind::WhileCondition: return "while-condition";
+  case RegionLayoutEdgeKind::WhileResult: return "while-result";
+  }
+  llvm_unreachable("unknown region layout edge");
+}
 
 StringRef stringifyConstraintKind(ConstraintKind kind) {
   switch (kind) {
@@ -97,7 +126,7 @@ LogicalResult LayoutConstraintGraph::finalize(Location loc) {
   });
 
   SmallVector<LayoutVarID> remap(variables.size());
-  SmallVector<LayoutVar> sortedVariables;
+  SmallVector<LayoutVar, 0> sortedVariables;
   sortedVariables.reserve(variables.size());
   for (auto [newID, oldID] : llvm::enumerate(order)) {
     remap[oldID] = newID;
@@ -139,15 +168,33 @@ LogicalResult LayoutConstraintGraph::finalize(Location loc) {
     return std::tie(lhsProv.rule, lhsProv.reason) <
            std::tie(rhsProv.rule, rhsProv.reason);
   });
-  for (auto [id, constraint] : llvm::enumerate(constraints))
+  SmallVector<LayoutConstraintID> constraintRemap(constraints.size());
+  for (auto [id, constraint] : llvm::enumerate(constraints)) {
+    constraintRemap[constraint.id] = id;
     constraint.id = id;
+  }
+  for (auto &edge : regionEdges) {
+    edge.source = remap[edge.source];
+    edge.target = remap[edge.target];
+    edge.constraint = constraintRemap[edge.constraint];
+  }
+  // A changed graph invalidates the last run's ID-indexed statistics.
+  propagationStatistics = {};
+  aliasFootprints.clear();
+  aliasPairProofs.clear();
+  preparationStatistics = {};
+  llvm::sort(regionEdges, [](const auto &lhs, const auto &rhs) {
+    return lhs.stableKey < rhs.stableKey;
+  });
   finalized = true;
   return verifyInvariants(loc);
 }
 
 LogicalResult LayoutConstraintGraph::verifyInvariants(Location loc) const {
   llvm::SmallDenseSet<StringRef, 16> names;
-  for (const LayoutVar &var : variables) {
+  for (auto [index, var] : llvm::enumerate(variables)) {
+    if (var.id != index)
+      return emitError(loc) << "layout variable ID differs from its array position";
     if (var.stableName.empty())
       return emitError(loc) << "layout variable has an empty stable name";
     if (!names.insert(var.stableName).second)
@@ -156,12 +203,25 @@ LogicalResult LayoutConstraintGraph::verifyInvariants(Location loc) const {
     if (!var.shapedType || !isa<ShapedType>(var.shapedType))
       return emitError(loc) << "layout variable '" << var.stableName
                             << "' does not have a shaped type";
+    if (var.storageAlias) {
+      const auto &alias = *var.storageAlias;
+      if (var.kind != LayoutKind::Storage || !alias.root || !alias.rootType ||
+          !alias.viewType || alias.viewType != var.shapedType ||
+          !alias.viewToRoot || alias.rootKey.empty() ||
+          alias.viewToRoot.getNumDims() != unsigned(alias.viewType.getRank()) ||
+          alias.viewToRoot.getNumResults() != unsigned(alias.rootType.getRank()) ||
+          alias.lowerBit >= alias.upperBit)
+        return emitError(loc) << "invalid storage alias endpoint metadata";
+    }
   }
 
-  for (const LayoutConstraint &constraint : constraints) {
+  for (auto [index, constraint] : llvm::enumerate(constraints)) {
+    if (constraint.id != index)
+      return emitError(loc) << "layout constraint ID differs from its array position";
     if ((constraint.kind == ConstraintKind::Convertible ||
          constraint.kind == ConstraintKind::TransformLayout ||
-         constraint.kind == ConstraintKind::StorageAccess) &&
+         constraint.kind == ConstraintKind::StorageAccess ||
+         constraint.kind == ConstraintKind::AliasLayout) &&
         constraint.vars.size() != 2)
       return emitError(loc) << "binary layout relation requires two endpoints";
     if (constraint.kind == ConstraintKind::Convertible &&
@@ -181,6 +241,15 @@ LogicalResult LayoutConstraintGraph::verifyInvariants(Location loc) const {
                               << id;
     if (constraint.provenance >= provenances.size())
       return emitError(loc) << "layout constraint has invalid provenance";
+    if (constraint.kind == ConstraintKind::AliasLayout) {
+      const auto &lhs = variables[constraint.vars[0]];
+      const auto &rhs = variables[constraint.vars[1]];
+      if (lhs.kind != LayoutKind::Storage || rhs.kind != LayoutKind::Storage ||
+          !lhs.storageAlias || !rhs.storageAlias ||
+          lhs.storageAlias->root != rhs.storageAlias->root ||
+          lhs.storageAlias->rootType != rhs.storageAlias->rootType)
+        return emitError(loc) << "alias relation requires two proven common-root storage endpoints";
+    }
     if (constraint.kind == ConstraintKind::RequireEncoding) {
       if (constraint.vars.size() != 1)
         return emitError(loc)
@@ -195,6 +264,82 @@ LogicalResult LayoutConstraintGraph::verifyInvariants(Location loc) const {
       return emitError(loc) << "layout equality constraint '"
                             << stringifyConstraintKind(constraint.kind)
                             << "' must reference at least two variables";
+  }
+
+  llvm::SmallDenseSet<StringRef, 16> regionKeys;
+  for (const auto &edge : regionEdges) {
+    if (edge.source >= variables.size() || edge.target >= variables.size() ||
+        edge.constraint >= constraints.size())
+      return emitError(loc) << "region layout edge references invalid ID";
+    if (!edge.owner || edge.stableKey.empty() ||
+        !regionKeys.insert(edge.stableKey).second)
+      return emitError(loc) << "region layout edge requires unique stable identity";
+    const auto &relation = constraints[edge.constraint];
+    bool resultEdge = edge.kind == RegionLayoutEdgeKind::ForResult ||
+                      edge.kind == RegionLayoutEdgeKind::WhileResult;
+    if (relation.strength != ConstraintStrength::Hard ||
+        relation.vars.size() != 2 ||
+        !llvm::is_contained(relation.vars, edge.source) ||
+        !llvm::is_contained(relation.vars, edge.target) ||
+        variables[edge.source].kind != LayoutKind::Distributed ||
+        variables[edge.target].kind != LayoutKind::Distributed ||
+        (resultEdge ? (edge.use || relation.kind != ConstraintKind::SameLayout)
+                    : (!edge.use || relation.use != edge.use ||
+                       relation.kind != ConstraintKind::Convertible)))
+      return emitError(loc) << "region layout edge does not match its hard relation";
+    if (edge.use && edge.use->getOwner() != edge.owner &&
+        edge.use->getOwner()->getParentOp() != edge.owner)
+      return emitError(loc) << "region layout use is outside its owner boundary";
+    // A commutative slot relation must not erase the direction of its region
+    // edge. Check actual SCF operands/arguments, not just ID membership.
+    Value source, target;
+    OpOperand *use = nullptr;
+    auto operand = [&](Operation *op, unsigned index) -> OpOperand * {
+      return op && index < op->getNumOperands() ? &op->getOpOperand(index) : nullptr;
+    };
+    auto terminator = [](Region &region) -> Operation * {
+      return region.empty() || region.front().empty() ? nullptr : region.front().getTerminator();
+    };
+    if (auto loop = dyn_cast<scf::ForOp>(edge.owner)) {
+      if (edge.slot < loop.getNumResults() && !loop.getRegion().empty()) {
+        if (edge.kind == RegionLayoutEdgeKind::ForResult) {
+          source = loop.getRegionIterArgs()[edge.slot];
+          target = loop.getResult(edge.slot);
+        } else if (edge.kind == RegionLayoutEdgeKind::ForInit) {
+          use = &loop.getInitsMutable()[edge.slot];
+          target = loop.getRegionIterArgs()[edge.slot];
+        } else if (edge.kind == RegionLayoutEdgeKind::ForBackedge) {
+          use = operand(terminator(loop.getRegion()), edge.slot);
+          target = loop.getResult(edge.slot);
+        }
+      }
+    } else if (auto loop = dyn_cast<scf::WhileOp>(edge.owner)) {
+      if (edge.kind == RegionLayoutEdgeKind::WhileInit ||
+          edge.kind == RegionLayoutEdgeKind::WhileBackedge) {
+        if (!loop.getBefore().empty() && edge.slot < loop.getBeforeArguments().size()) {
+          target = loop.getBeforeArguments()[edge.slot];
+          use = edge.kind == RegionLayoutEdgeKind::WhileInit
+              ? operand(loop, edge.slot) : operand(terminator(loop.getAfter()), edge.slot);
+        }
+      } else if (edge.slot < loop.getNumResults() && !loop.getAfter().empty()) {
+        target = loop.getResult(edge.slot);
+        if (edge.kind == RegionLayoutEdgeKind::WhileResult)
+          source = loop.getAfterArguments()[edge.slot];
+        else if (edge.kind == RegionLayoutEdgeKind::WhileCondition)
+          use = operand(terminator(loop.getBefore()), edge.slot + 1);
+      }
+    } else if (auto branch = dyn_cast<scf::IfOp>(edge.owner)) {
+      if (edge.kind == RegionLayoutEdgeKind::IfYield && edge.use &&
+          isa<scf::YieldOp>(edge.use->getOwner()) && edge.slot < branch.getNumResults()) {
+        target = branch.getResult(edge.slot);
+        use = operand(edge.use->getOwner(), edge.slot);
+      }
+    }
+    if (use) source = use->get();
+    if (!source || !target || use != edge.use ||
+        variables[edge.source].value != source || variables[edge.target].value != target ||
+        (!resultEdge && (relation.vars[0] != edge.source || relation.vars[1] != edge.target)))
+      return emitError(loc) << "region layout edge has invalid owner, slot or direction";
   }
 
   for (const LayoutProvenance &provenance : provenances) {
@@ -249,8 +394,15 @@ LayoutConstraintGraph::lookupVariable(Value value) const {
 }
 
 void LayoutConstraintGraph::print(raw_ostream &os) const {
-  for (const LayoutVar &var : variables)
+  for (const LayoutVar &var : variables) {
     os << "var " << var.id << " " << var.stableName << "\n";
+    if (var.storageAlias)
+      os << "alias-endpoint " << var.id << " root=" << var.storageAlias->rootKey
+         << " transform=" << var.storageAlias->viewToRoot << " bits=["
+         << var.storageAlias->lowerBit << "," << var.storageAlias->upperBit
+         << ") alignment=" << var.storageAlias->rootAlignment
+         << " evidence=" << var.storageAlias->alignmentEvidence << "\n";
+  }
   for (const LayoutConstraint &constraint : constraints) {
     os << "constraint " << constraint.id << " "
        << stringifyConstraintStrength(constraint.strength) << " "
@@ -259,6 +411,16 @@ void LayoutConstraintGraph::print(raw_ostream &os) const {
     const LayoutProvenance &provenance = provenances[constraint.provenance];
     os << "] " << provenance.rule << ": " << provenance.reason << "\n";
   }
+  for (const auto &edge : regionEdges)
+    os << "region-edge " << stringifyRegionLayoutEdgeKind(edge.kind)
+       << " slot=" << edge.slot << " " << edge.source << " -> " << edge.target
+       << " constraint=" << edge.constraint << " " << edge.stableKey << "\n";
+  propagationStatistics.strict.print("strict", os);
+  propagationStatistics.common.print("common", os);
+  os << "candidate-preparation origins=" << preparationStatistics.origins
+     << " projected=" << preparationStatistics.projectedCandidates
+     << " footprints=" << preparationStatistics.footprintEvaluations
+     << " pair-proofs=" << preparationStatistics.pairProofEvaluations << "\n";
 }
 
 raw_ostream &operator<<(raw_ostream &os,

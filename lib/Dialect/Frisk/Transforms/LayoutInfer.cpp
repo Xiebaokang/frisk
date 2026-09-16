@@ -43,8 +43,7 @@ public:
     std::unique_ptr<LayoutTarget> target = createSM90LayoutTarget();
     FailureOr<LayoutConstraintGraph> graph =
         collectLayoutConstraints(getOperation(), *target);
-    if (failed(graph) || failed(propagateStrict(*graph)) ||
-        failed(propagateCommonToFixedPoint(*graph))) {
+    if (failed(graph) || failed(propagateCommonToFixedPoint(*graph))) {
       signalPassFailure();
       return;
     }

@@ -137,6 +137,11 @@ TEST_F(DistributedPropagationTest, HardConsumerChoicesConvertExactlyOneRealUse) 
 
   auto reordered = *graph;
   std::reverse(reordered.getConstraints().begin(), reordered.getConstraints().end());
+  // Model a different valid construction order: IDs identify array entries.
+  // This fixture has no region edges requiring a corresponding ID remap.
+  ASSERT_TRUE(reordered.getRegionEdges().empty());
+  for (auto [id, constraint] : llvm::enumerate(reordered.getConstraints()))
+    constraint.id = id;
   for (auto &var : reordered.getVariables())
     std::reverse(var.candidates.begin(), var.candidates.end());
   ASSERT_TRUE(succeeded(reordered.finalize(module->getLoc())));

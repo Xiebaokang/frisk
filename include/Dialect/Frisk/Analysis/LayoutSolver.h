@@ -54,6 +54,10 @@ FailureOr<LayoutConstraintGraph> collectLayoutConstraints(
 LogicalResult collectDistributedLayoutConstraints(
     Operation *root, LayoutConstraintGraph &graph, LayoutConstraintBuilder &builder);
 
+/// Finite origins, visited once per actual endpoint; never a synthetic root var.
+LogicalResult initializeStorageAliasCandidates(
+    Operation *root, LayoutConstraintGraph &graph, LayoutTarget &target);
+
 LogicalResult propagateStrict(LayoutConstraintGraph &graph);
 LogicalResult propagateCommonToFixedPoint(LayoutConstraintGraph &graph);
 

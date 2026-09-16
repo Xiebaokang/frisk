@@ -2,6 +2,7 @@
 #include "Dialect/Frisk/Analysis/LayoutRelations.h"
 
 #include <functional>
+#include <deque>
 
 #include "Dialect/Frisk/IR/FriskDialect.h"
 #include "Dialect/Frisk/IR/FriskOps.h"
@@ -64,6 +65,17 @@ LogicalResult emitConflict(const LayoutConstraintGraph &graph,
   };
   attachSeed(0, lhsSeeds);
   attachSeed(1, rhsSeeds);
+  if (constraint.kind == ConstraintKind::AliasLayout &&
+      !lhsSeeds.empty() && !rhsSeeds.empty()) {
+    auto proof = proveAliasLayoutRelation(graph, constraint.vars[0],
+        lhsSeeds.front().value, constraint.vars[1], rhsSeeds.front().value);
+    std::string coordinate;
+    llvm::raw_string_ostream os(coordinate);
+    llvm::interleaveComma(proof.counterexample, os);
+    diagnostic.attachNote(provenance.source->getLoc())
+        << (proof.status == ProofStatus::Unknown ? "unknown alias proof: " : "alias counterexample: ")
+        << proof.reason << "; coordinate [" << coordinate << "]";
+  }
   return failure();
 }
 
@@ -111,11 +123,6 @@ bool isWholeTileStaticCopy(CopyOp copy) {
          copy.getDstMap().getNumResults() == 0;
 }
 
-Value getLayoutViewAliasRoot(Value value) {
-  while (auto view = value.getDefiningOp<LayoutViewOp>())
-    value = view.getSource();
-  return value;
-}
 
 } // namespace
 
@@ -343,49 +350,52 @@ collectLayoutConstraints(Operation *root, LayoutTarget &target,
   bool failedCollection = false;
 
   root->walk([&](LayoutViewOp view) {
+    auto info = analyzeStorageAlias(view.getResult());
+    if (failed(info)) { failedCollection = true; return; }
+    info->rootKey = getStableValueName(info->root, LayoutKind::Storage, 0);
     LayoutVarID id = builder.getOrCreateStorageVar(view.getResult());
-    Value aliasRoot = getLayoutViewAliasRoot(view.getSource());
-    auto [sourceIt, inserted] = viewsBySource.try_emplace(aliasRoot);
-    if (inserted)
-      sourceOrder.push_back(aliasRoot);
+    graph.getVariable(id).storageAlias = *info;
+    auto [sourceIt, inserted] = viewsBySource.try_emplace(info->root);
+    if (inserted) sourceOrder.push_back(info->root);
     sourceIt->second.push_back(id);
     if (StorageLayoutAttr layout = view.getLayoutAttr())
       failedCollection |= failed(builder.require(id, layout, view, "layout_view"));
   });
+  if (failedCollection) return failure();
 
   for (Value source : sourceOrder) {
     ArrayRef<LayoutVarID> ids = viewsBySource.find(source)->second;
-    SmallVector<std::pair<LayoutVarID, LayoutCandidate>> explicitSeeds;
-    for (LayoutVarID id : ids)
-      for (const LayoutCandidate &candidate : graph.getVariable(id).candidates)
-        explicitSeeds.emplace_back(id, candidate);
+    uint64_t alignment = graph.getVariable(ids.front()).storageAlias->rootAlignment;
+    std::string alignmentEvidence =
+        graph.getVariable(ids.front()).storageAlias->alignmentEvidence;
+    // Only a whole-root binding may declare a root base-alignment contract.
+    // Child demands never become root guarantees.
     for (LayoutVarID id : ids) {
-      LayoutVar &var = graph.getVariable(id);
-      for (const auto &[sourceID, seed] : explicitSeeds)
-        if (llvm::none_of(var.candidates,
-                          [&](const LayoutCandidate &candidate) {
-              return candidate.value == seed.value;
-            })) {
-          LayoutCandidate propagated = seed;
-          std::optional<ProvenanceID> parent;
-          if (seed.provenance != kInvalidProvenanceID &&
-              seed.provenance < graph.getProvenances().size())
-            parent = seed.provenance;
-          std::string reason = "candidate propagated from " +
-                               graph.getVariable(sourceID).stableName;
-          propagated.provenance = graph.addProvenance(
-              parent, var.anchor, "same-source-layout-view", reason);
-          var.candidates.push_back(propagated);
+      const auto &var = graph.getVariable(id);
+      const auto &info = *var.storageAlias;
+      if (info.viewType.getShape() != info.rootType.getShape() ||
+          !info.viewToRoot.isIdentity()) continue;
+      for (const auto &seed : var.candidates)
+        if (auto storage = dyn_cast<StorageLayoutAttr>(seed.value)) {
+          alignment = std::max<uint64_t>(alignment, storage.getAlignment().getInt());
+          alignmentEvidence += "; whole-root binding precondition at " + var.stableName +
+              " (not a runtime proof), alignment=" +
+              std::to_string(storage.getAlignment().getInt());
         }
-      updateState(var);
     }
-    for (size_t index = 1; index < ids.size(); ++index)
-      graph.addConstraint(ConstraintKind::AliasLayout,
-                          ConstraintStrength::Hard,
-                          {ids[index - 1], ids[index]},
-                          graph.getVariable(ids[index]).anchor,
-                          "same-source-layout-view",
-                          "views of the same storage value must agree");
+    for (auto id : ids) {
+      graph.getVariable(id).storageAlias->rootAlignment = alignment;
+      graph.getVariable(id).storageAlias->alignmentEvidence = alignmentEvidence;
+    }
+    // Partial overlap is not transitive: every pair matters, including disjoint
+    // logical domains whose proposed physical intervals might collide.
+    for (size_t i = 0; i < ids.size(); ++i)
+      for (size_t j = i + 1; j < ids.size(); ++j)
+        graph.addConstraint(ConstraintKind::AliasLayout, ConstraintStrength::Hard,
+            {ids[i], ids[j]}, graph.getVariable(ids[j]).anchor,
+            "same-source-layout-view",
+            "coordinate and bit-interval agreement on root " +
+                graph.getVariable(ids[i]).storageAlias->rootKey);
   }
 
   root->walk([&](CopyOp copy) {
@@ -422,6 +432,9 @@ collectLayoutConstraints(Operation *root, LayoutTarget &target,
   if (mode == LayoutCollectionMode::RelationsOnly)
     return graph;
 
+  if (failed(initializeStorageAliasCandidates(root, graph, target)))
+    return failure();
+
   auto projectCandidatesToFixedPoint = [&]() {
     bool addedCandidate;
     do {
@@ -431,12 +444,14 @@ collectLayoutConstraints(Operation *root, LayoutTarget &target,
             !isEqualityConstraint(constraint.kind))
           continue;
         for (LayoutVarID sourceID : constraint.vars) {
+          if (graph.getVariable(sourceID).kind == LayoutKind::Storage) continue;
           SmallVector<LayoutCandidate> sourceCandidates(
               graph.getVariable(sourceID).candidates);
           for (LayoutVarID targetID : constraint.vars) {
             if (sourceID == targetID)
               continue;
             LayoutVar &targetVar = graph.getVariable(targetID);
+            if (targetVar.kind == LayoutKind::Storage) continue;
             for (const LayoutCandidate &sourceCandidate : sourceCandidates) {
               FailureOr<Attribute> projected = projectLayoutCandidate(
                   graph, constraint, sourceID, sourceCandidate.value, targetID);
@@ -474,7 +489,7 @@ collectLayoutConstraints(Operation *root, LayoutTarget &target,
   // from spuriously overflowing the bootstrap domain limit.
   projectCandidatesToFixedPoint();
   for (LayoutVar &var : graph.getVariables()) {
-    if (!var.candidates.empty())
+    if (!var.candidates.empty() || var.kind == LayoutKind::Storage)
       continue;
     SmallVector<LayoutCandidate> candidates;
     target.enumerateCandidates(var, candidates);
@@ -515,54 +530,95 @@ collectLayoutConstraints(Operation *root, LayoutTarget &target,
   return graph;
 }
 
-LogicalResult propagateStrict(LayoutConstraintGraph &graph) {
-  bool changed;
-  do {
-    changed = false;
-    for (const LayoutConstraint &constraint : graph.getConstraints()) {
-      if (constraint.strength != ConstraintStrength::Hard)
-        continue;
-      if (constraint.kind == ConstraintKind::RequireEncoding) {
-        LayoutVar &var = graph.getVariable(constraint.vars.front());
-        size_t oldSize = var.candidates.size();
-        llvm::erase_if(var.candidates, [&](const LayoutCandidate &candidate) {
-          return candidate.value != constraint.requiredEncoding;
-        });
-        changed |= oldSize != var.candidates.size();
-        updateState(var);
-        if (var.state == LayoutState::Conflict)
-          return emitConflict(graph, constraint);
-        continue;
-      }
-      if (!isEqualityConstraint(constraint.kind))
-        continue;
-      bool anySingleton = llvm::any_of(constraint.vars, [&](LayoutVarID id) {
-        return graph.getVariable(id).candidates.size() == 1;
+static LogicalResult runPropagationWorklist(LayoutConstraintGraph &graph,
+                                            bool strict) {
+  auto &stats = strict ? graph.getPropagationStatistics().strict
+                       : graph.getPropagationStatistics().common;
+  stats = {};
+  stats.ran = true;
+  stats.changesByVariable.resize(graph.getVariables().size(), 0);
+  SmallVector<SmallVector<LayoutConstraintID>> adjacency(graph.getVariables().size());
+  SmallVector<bool> inQueue(graph.getConstraints().size(), false);
+  std::deque<LayoutConstraintID> queue;
+  auto enqueue = [&](LayoutConstraintID id) {
+    if (inQueue[id]) return;
+    inQueue[id] = true;
+    queue.push_back(id);
+    ++stats.enqueues;
+    stats.maximumQueue = std::max<uint64_t>(stats.maximumQueue, queue.size());
+  };
+  for (const auto &relation : graph.getConstraints()) {
+    if (relation.strength != ConstraintStrength::Hard ||
+        !(isEqualityConstraint(relation.kind) ||
+          (strict && relation.kind == ConstraintKind::RequireEncoding)))
+      continue;
+    enqueue(relation.id);
+    for (LayoutVarID id : relation.vars)
+      if (!llvm::is_contained(adjacency[id], relation.id))
+        adjacency[id].push_back(relation.id);
+  }
+  stats.initialConstraints = queue.size();
+  stats.popUpperBound = stats.staticPopUpperBound = queue.size();
+  for (const auto &var : graph.getVariables()) {
+    stats.initialCandidates += var.candidates.size();
+    stats.staticPopUpperBound += var.candidates.size() * adjacency[var.id].size();
+  }
+  stats.finalCandidates = stats.initialCandidates;
+  while (!queue.empty()) {
+    LayoutConstraintID id = queue.front();
+    queue.pop_front();
+    inQueue[id] = false;
+    ++stats.queuePops;
+    const auto &relation = graph.getConstraint(id);
+    bool require = relation.kind == ConstraintKind::RequireEncoding;
+    if (strict && !require &&
+        llvm::none_of(relation.vars, [&](LayoutVarID var) {
+          return graph.getVariable(var).candidates.size() == 1;
+        }))
+      continue; // Remains in adjacency: a later seed can enable this relation.
+    SmallVector<std::pair<LayoutVarID, size_t>> before;
+    for (LayoutVarID var : relation.vars)
+      if (llvm::none_of(before, [&](auto entry) { return entry.first == var; }))
+        before.emplace_back(var, graph.getVariable(var).candidates.size());
+    LogicalResult result = success();
+    if (require) {
+      auto &var = graph.getVariable(relation.vars.front());
+      llvm::erase_if(var.candidates, [&](const auto &candidate) {
+        return candidate.value != relation.requiredEncoding;
       });
-      if (!anySingleton)
-        continue;
-      if (failed(applyEqualityConstraint(graph, constraint, changed)))
-        return failure();
+      updateState(var);
+      if (var.state == LayoutState::Conflict)
+        result = emitConflict(graph, relation);
+    } else {
+      bool changed = false;
+      result = applyEqualityConstraint(graph, relation, changed);
     }
-  } while (changed);
+    for (auto [var, size] : before) {
+      size_t after = graph.getVariable(var).candidates.size();
+      assert(after <= size && "propagation must only shrink frozen domains");
+      if (after == size) continue;
+      stats.deletedCandidates += size - after;
+      stats.finalCandidates -= size - after;
+      ++stats.domainChanges;
+      ++stats.changesByVariable[var];
+      stats.popUpperBound += adjacency[var].size();
+      for (auto affected : adjacency[var]) enqueue(affected);
+    }
+    assert(stats.hasValidBounds() && "invalid monotone propagation accounting");
+    if (failed(result)) return failure();
+  }
+  assert(stats.hasValidBounds() && "invalid fixed-point accounting");
   return success();
 }
 
+LogicalResult propagateStrict(LayoutConstraintGraph &graph) {
+  graph.getPropagationStatistics().common = {};
+  return runPropagationWorklist(graph, true);
+}
+
 LogicalResult propagateCommonToFixedPoint(LayoutConstraintGraph &graph) {
-  if (failed(propagateStrict(graph)))
-    return failure();
-  bool changed;
-  do {
-    changed = false;
-    for (const LayoutConstraint &constraint : graph.getConstraints()) {
-      if (constraint.strength != ConstraintStrength::Hard ||
-          !isEqualityConstraint(constraint.kind))
-        continue;
-      if (failed(applyEqualityConstraint(graph, constraint, changed)))
-        return failure();
-    }
-  } while (changed);
-  return success();
+  if (failed(propagateStrict(graph))) return failure();
+  return runPropagationWorklist(graph, false);
 }
 
 } // namespace mlir::frisk

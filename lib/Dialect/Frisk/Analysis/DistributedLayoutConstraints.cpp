@@ -40,6 +40,24 @@ LogicalResult collectDistributedLayoutConstraints(
     return builder.convertible(builder.getOrCreateDistributedVar(use.get()),
                                 expected, use);
   };
+  auto recordRegion = [&](RegionLayoutEdgeKind kind, LayoutVarID source,
+                          LayoutVarID target, Operation *owner,
+                          OpOperand *use, unsigned slot) {
+    const auto &constraint = graph.getConstraints().back();
+    std::string key = (stringifyRegionLayoutEdgeKind(kind) + ":" +
+        graph.getVariable(source).stableName + "->" +
+        graph.getVariable(target).stableName + ":" +
+        constraint.stableUseKey + ":" + std::to_string(slot)).str();
+    graph.addRegionEdge({kind, source, target, constraint.id, owner, use,
+                         slot, std::move(key)});
+  };
+  auto connectRegionUse = [&](RegionLayoutEdgeKind kind, OpOperand &use,
+                              LayoutVarID expected, Operation *owner,
+                              unsigned slot) {
+    auto source = builder.getOrCreateDistributedVar(use.get());
+    (void)connectUse(use, expected);
+    recordRegion(kind, source, expected, owner, &use, slot);
+  };
   auto result = root->walk<WalkOrder::PreOrder>([&](Operation *op) -> WalkResult {
     bool tensorBearing = llvm::any_of(op->getOperandTypes(), [](Type t) {
       return isa<TensorType>(t);
@@ -116,7 +134,11 @@ LogicalResult collectDistributedLayoutConstraints(
         auto slot = builder.getOrCreateDistributedVar(arg);
         (void)builder.same(slot, builder.getOrCreateDistributedVar(loop.getResult(index)),
                            op, "for-carried-slot");
-        (void)connectUse(loop.getInitsMutable()[index], slot);
+        recordRegion(RegionLayoutEdgeKind::ForResult, slot,
+                     builder.getOrCreateDistributedVar(loop.getResult(index)),
+                     op, nullptr, index);
+        connectRegionUse(RegionLayoutEdgeKind::ForInit,
+                         loop.getInitsMutable()[index], slot, op, index);
       }
       return WalkResult::advance();
     }
@@ -125,13 +147,19 @@ LogicalResult collectDistributedLayoutConstraints(
       // have different arities and types. Do not tie unrelated tuple slots.
       for (auto [index, arg] : llvm::enumerate(loop.getBeforeArguments()))
         if (isa<RankedTensorType>(arg.getType()))
-          (void)connectUse(op->getOpOperand(index),
-                           builder.getOrCreateDistributedVar(arg));
+          connectRegionUse(RegionLayoutEdgeKind::WhileInit,
+                           op->getOpOperand(index),
+                           builder.getOrCreateDistributedVar(arg), op, index);
       for (auto [index, arg] : llvm::enumerate(loop.getAfterArguments()))
-        if (isa<RankedTensorType>(arg.getType()))
+        if (isa<RankedTensorType>(arg.getType())) {
           (void)builder.same(builder.getOrCreateDistributedVar(arg),
               builder.getOrCreateDistributedVar(loop.getResult(index)), op,
               "while-result-slot");
+          recordRegion(RegionLayoutEdgeKind::WhileResult,
+              builder.getOrCreateDistributedVar(arg),
+              builder.getOrCreateDistributedVar(loop.getResult(index)),
+              op, nullptr, index);
+        }
       return WalkResult::advance();
     }
     if (auto yield = dyn_cast<scf::YieldOp>(op)) {
@@ -148,7 +176,11 @@ LogicalResult collectDistributedLayoutConstraints(
           op->emitError("operation has no layout constraint model for tensor yield");
           return WalkResult::interrupt();
         }
-        (void)connectUse(use, builder.getOrCreateDistributedVar(expected));
+        auto kind = isa<scf::IfOp>(parent) ? RegionLayoutEdgeKind::IfYield
+                  : isa<scf::ForOp>(parent) ? RegionLayoutEdgeKind::ForBackedge
+                                           : RegionLayoutEdgeKind::WhileBackedge;
+        connectRegionUse(kind, use, builder.getOrCreateDistributedVar(expected),
+                         parent, index);
       }
       return WalkResult::advance();
     }
@@ -156,8 +188,10 @@ LogicalResult collectDistributedLayoutConstraints(
       auto loop = cast<scf::WhileOp>(op->getParentOp());
       for (OpOperand &use : op->getOpOperands().drop_front())
         if (isa<RankedTensorType>(use.get().getType()))
-          (void)connectUse(use, builder.getOrCreateDistributedVar(
-              loop.getResult(use.getOperandNumber() - 1)));
+          connectRegionUse(RegionLayoutEdgeKind::WhileCondition, use,
+              builder.getOrCreateDistributedVar(
+                  loop.getResult(use.getOperandNumber() - 1)),
+              loop, use.getOperandNumber() - 1);
       return WalkResult::advance();
     }
     if (auto load = dyn_cast<TileLoadOp>(op)) {
