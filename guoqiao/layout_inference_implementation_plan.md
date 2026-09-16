@@ -4,19 +4,19 @@
 
 **Goal:** 在 Frisk 中实现一个面向 NVIDIA SM90/SM90a 的 MLIR-native 布局系统闭环，覆盖组合布局代数、Distributed/Storage IR、约束传播、有限候选求解、显式 conversion、正确性验证和性能守门。
 
-**Architecture:** 采用“基础能力 + 纵向切片 + 逐类扩展”。Local/Register 使用带 `DistributedEncodingAttr` 的 RankedTensor SSA，Shared/Global 使用 MemRef 与 `StorageLayoutAttr` binding；Op 只收集约束，solver 只选择 assignment，materializer 在求解后统一改写 IR。现有 `LayoutAttr + DenseMap<Value, Attribute>` 仅作为迁移期语义基线，通过 adapter 接入新系统。
+**Architecture:** 采用“基础能力 + 纵向切片 + 逐类扩展”。Local/Register 使用带 `DistributedEncodingAttr` 的 RankedTensor SSA，Shared/Global 使用 MemRef 与 `StorageLayoutAttr` binding；Op 只收集约束，solver 只选择 assignment，materializer 在求解后统一改写 IR。现有 `LayoutAttr + DenseMap<Value, Attribute>` 通过 adapter 提供已知正确子集的迁移回归；不能作为新版规则的唯一真值来源，不能为差分一致保留已知错误。
 
 **Tech Stack:** C++17、LLVM/MLIR ODS/TableGen、MLIR Pass/Dialect Conversion、Affine/Presburger、SCF、MemRef、Tensor、GPU/NVGPU/NVVM、LLVM ADT/APInt、CMake/Ninja、llvm-lit/FileCheck、CTest、CUDA/Nsight 性能工具。
 
-> **执行状态（2026-09-10）：M0–M3 已完成并通过 Gate；M3 逐任务及整分支审查通过。下一未完成里程碑为 M4（Task 18）。**
+> **执行状态（2026-09-12）：M0–M3 已完成。M4 源码审计与 Task 18 设计提案已整理；用户要求先审阅文档、再确认实现，因此 Task 18–22 均未实施。本轮不修改编译器代码或测试。**
 
-> **工作区说明（本地合并于 2026-09-11）：M3 实现及同步文档已从 `feature/m3-distributed-layout`（`be71d91`，实现验收基线 `642c30b`）合入本地 `main`。可直接在主工作区 `/home/baopeihua/frisk` 构建和运行下列 M3 测试；合并后的 27 lit、74 unit、4 CTest 及重复推断检查均通过。本次未推送远端。**
+> **工作区说明：M3 从 `feature/m3-distributed-layout`（`be71d91`，实现验收基线 `642c30b`）于 2026-09-11 合入 `main`，合并提交 `b120d06400a14a703a44dac1a37a0b38d8110935` 已在此前按用户要求推送至 `origin`（guoqiao7/frisk）。本轮只编辑本计划和比较文档，不提交或推送，也不改动未跟踪的 `guoqiao/inference_detail/README.md`。本轮重新运行 M3 基线：27 lit、74 unit、4 CTest 全通过。**
 
 ## Global Constraints
 
 - 首个目标仅为 NVIDIA SM90/SM90a；不得在通用 solver 中散布 target 字符串判断。
 - 完整 WGMMA/TMA/mbarrier 指令 lowering 不在本计划范围；本计划实现布局契约、静态成本和 conversion 微基准所需的最小 lowering adapter。
-- TileLang 语义参考固定为 `6623b12d232b343648a5ba99992e3e6f0d6376d2`，不得链接或 vendor TVM/TIRX 类型。
+- 本轮 TileLang 审计及 Task 28 拟建立的新语义参考固定为 `5e149e31674658f94779c7d0c6039549a1853123`；旧 `6623b12d232b343648a5ba99992e3e6f0d6376d2` 保留作历史迁移参考。上游升级不自动改变 Frisk 契约；每次须记录新旧行为与采用理由，不得链接或 vendor TVM/TIRX 类型。
 - Local/Register 的最终公共表示必须是 RankedTensor SSA；不得继续扩展 local-memory MemRef 作为长期寄存器模型。
 - Shared/Global 保持 MemRef；XOR storage mapping 通过 `frisk.layout_view`/binding 表达，不强塞进 MemRef semi-affine layout。
 - `frisk.convert_layout` 和 rematerialization 是普通候选，不以“零转换方案无解”为启用条件。
@@ -24,6 +24,7 @@
 - 所有 worklist、constraint、candidate 和 tie-break 必须使用稳定 ID，结果不得依赖 DenseMap/指针遍历顺序。
 - 用户 IR 错误、unsupported shape 和求解冲突必须返回带位置的诊断；不得用 assertion 处理。
 - 每项公共语义或架构边界发生变化时，必须在同一任务中同步维护 `guoqiao/layout_inference_design.md`。
+- 长期同时维护本计划和 `guoqiao/layout_inference_strategy_comparison.md`：计划记完成度/设计/验收，比较记版本证据/取舍/差异假设。当前 Task 18 是待确认提案，尚未更改公共语义；确认实施时再同步设计总文档和属性/API 注释。
 - 现有用户修改属于用户；不得覆盖 `build.sh` 或其他与当前任务无关的工作区变更。
 - 正确性零容忍：race、OOB、invalid ownership、未解析 LayoutVar 和 nondeterministic IR 必须为 0。
 - 性能守门：受支持 kernel 固定环境中位运行时间回退不超过 3%；常规 component candidate 上限 256，首版 beam width 32，布局推断不超过完整编译时间的 10%。
@@ -80,10 +81,21 @@ cmake --build build --target FriskIR FriskTransforms frisk-opt check-frisk --par
 git diff --check
 rg -n "LayoutAttr|DistributedEncodingAttr|StorageLayoutAttr|convert_layout|CostVector" \
   guoqiao/layout_inference_design.md \
+  guoqiao/layout_inference_implementation_plan.md \
   guoqiao/layout_inference_strategy_comparison.md
 ```
 
 如果实现改变了属性字段、映射方向、hard/soft 边界、候选优先级、conversion 策略、里程碑范围或性能阈值，必须先更新设计文档再提交。
+
+每项布局任务还必须留下以下审计记录：
+
+1. Frisk 与上游固定 SHA、审计日期、源码符号/永久链接；区分旧版已有和本区间新增。
+2. 旧规则的问题、当前 Frisk 的适配约束，以及采用/调整/拒绝的决定；源版本升级不能只更换 SHA。
+3. 已实现、设计待确认、未来目标分别标记；测试源码存在不等于本轮执行通过。
+4. 新旧行为的正例、反例、失败策略与实际验证命令；旧版错误用独立语义不变量修正，不能强制复制。
+5. 差异化写成可检验假设，注明当前证据和否证条件；不把通用 alias/GF(2)/while/worklist 当作首创。
+
+审计历史与精确上游证据集中在[比较文档 §0、§13、§15](./layout_inference_strategy_comparison.md)；下方 M4 记录本次缺口和待确认设计。Task 28 corpus 尚未生成，本轮也未运行 TileLang/Triton 测试或 GPU 性能实验。
 
 ## 1. 里程碑与依赖
 
@@ -1999,71 +2011,260 @@ Expected: 多 consumer IR 合法；共同布局或 conversion 由 solution 明�
 
 ## M4：完整约束传播与旧 IR 迁移
 
+### 2026-09-12 实现审计与阶段划分
+
+本轮读 Frisk `b120d06`、TileLang `5e149e3`、Triton `42c5e89` 的源码与相关测试；完整 SHA、永久链接及比较结论见[比较文档](./layout_inference_strategy_comparison.md)。TileLang 另对照旧 `6623b12`，未改用户的 TileLang checkout。
+
+| 阶段 | Task | 本阶段目的 | 本轮状态 |
+| --- | --- | --- | --- |
+| 第一阶段 | 18 | 坐标 alias、显式 region graph、可审计收敛 | 审计完成；以下设计待用户确认，未编码 |
+| 第二阶段 | 19 | Copy/Fill/Parallel 进入新接口与约束 | 未开始；须复核新版 Copy ABI、读写/replication 区别 |
+| 第三阶段 | 20–21 | Tensor MMA/GEMM 与 Reduce 规则适配 | 未开始；须复核 target contract、PartialFragment/owner、reducer 语境 |
+| 第四阶段 | 22 | normalization、旧生产逻辑退役和集成 | 未开始；依赖前三阶段 Gate |
+
+审计结论与具体修正：
+
+| 项目 | 当前实际实现/上游证据 | 决定 |
+| --- | --- | --- |
+| Frisk storage alias | 只沿 layout_view 找 root；邻接 AliasLayout 链、候选直接复制、Attr== | Task 18 改坐标证明；不能声称 cast/subview 已支持 |
+| Frisk SCF | M3 已有 if/for/while，while 输入/输出两 tuple 已分开 | 保留语义并显式记录边，不重做或弱化为同槽位强相等 |
+| Frisk propagation | 候选增长 closure 后执行多轮全图扫描，无可核验 pop/deletion 统计 | 分离有界候选准备与单调删减 worklist |
+| Frisk actual verifier | 从实际 IR 重置 singleton 并核验；事务提交已存在 | 保留无推测、无 future conversion 的验证边界；纠正 RelationsOnly 提前复制 alias seed 的模式契约 |
+| TileLang alias | bit-aware reshape、same-data 分组、widening 同线程/连续槽位证明旧版就已有 | 借鉴 storage bits 不变量，但不把同存储等同坐标恒等；dtype reinterpret 本阶段仍拒绝 |
+| TileLang 更新 | PartialFragment、reducer unset→narrow→wide、dst-steering、epoch 语境扩展、attempt 隔离；spill-aware 默认评分和 opt-in I/O 模型 | Op/reducer 规则由 Task 19–21 审阅适配，cost policy 留给 M5/Task 23；Task 18 不引入 reducer/cost solver |
+| Triton 当前 | while 正向双 tuple；物理 BufferRegion 用于 effect/ConSan/同步；PaddedSharedEncoding 已组合 padding/linear | 不能把这些单独宣称为 Frisk 创新；比较统一约束的范围、证明与失败契约 |
+| 旧 Frisk Op | 旧局部方法还在，但新 pass 尚未完整使用 Op interface models | 迁移按当前语义与独立 oracle；不能只搬旧 args 下标/映射代码 |
+
+本轮基线验证命令（均 exit 0）：
+
+```bash
+cmake --build build --target check-frisk FriskLayoutUnitTests \
+  frisk_attr_test frisk_reduce_layout_test frisk_layout_pass_test \
+  frisk_memory_effect_test --parallel 32
+build/unittests/Dialect/Frisk/FriskLayoutUnitTests --gtest_brief=1
+ctest --test-dir build --output-on-failure
+```
+
+结果：27/27 lit、74/74 unit（12 suites）、4/4 CTest。它们确认审计起点可回归，不包含尚未编写的 Task 18 用例；没有上游运行差分或性能结论。
+
+验证过程备注：最终复跑时，一次与重新构建并行启动的 CTest 报 `permission denied / BAD_COMMAND`，4 个进程均未进入测试；检查日志与可执行权限后，在相关目标链接完成、经授权的沙箱外环境重跑，4/4 通过。未为此修改代码；不将该次启动失败当作功能断言失败，也不省略其验证记录。文档检查另核对了 65 个当前源码/本地链接及 1 个历史源码链接，`git diff --check` 通过。
+
 ### Task 18: 完成 alias/view 与 region graph
 
-**Files:**
+**状态：设计提案 v1（2026-09-12），待用户确认。本节所有新结构、行为与测试均尚未实现。**
 
-- Modify: `lib/Dialect/Frisk/Analysis/LayoutConstraint.cpp`
-- Modify: `lib/Dialect/Frisk/Analysis/LayoutPropagation.cpp`
-- Modify: `lib/Dialect/Frisk/Analysis/LayoutVerifier.cpp`
-- Create: `unittests/Dialect/Frisk/Layout/AliasRegionTest.cpp`
-- Create: `test/Transforms/layout-alias.mlir`
-- Create: `test/Transforms/layout-scf-fixed-point.mlir`
+- [x] 固定三方源码版本并完成实现审计，修正比较文档。
+- [x] 写明 Task 18 的支持边界、地址契约、候选/传播算法、失败语义与验收矩阵。
+- [ ] 用户确认以下设计与支持边界。
+- [ ] 红灯测试 → 实现 → 独立评审 → Gate。
+- [ ] 经用户授权后提交/集成；本轮不执行下文计划中的提交命令。
 
-**Interfaces:**
+#### 18.1 范围与设计选择
 
-- Extends graph with：
+采用“坐标关系驱动的别名分析”。支持同元素类型/同 memory space 的静态 `memref.cast`、`memref.subview`（非零 offset、正 stride、降秩、嵌套），并保留 `layout_view` 的纯绑定语义。这里的“静态”是所需的 root shape、路径 metadata、边界和单射性都能证明，不只是 result type 看起来静态。
+
+第一阶段不支持动态 offset/size/stride、dtype reinterpret、memory-space cast、未知 view 语义、非正 stride、无法证明的 root alias/容量；这些不是可忽略边，而应在相关布局链上给出明确诊断。不扩展任意 memref.reshape、非结构化 CFG、跨过程 alias 或 memref loop-carried alias 分析；不同函数实参之间的 MayAlias 不升级为 MustAlias，也不据 root ID 不同断言 NoAlias。Region 部分保持 M3 的 Tensor SCF 范围。
+
+不扩展 GEMM/Reduce、成本求解、conversion hoist/remat 或完整硬件 lowering；不放宽现有 Copy/TileLoad/TileStore 的“直接 layout_view operand + whole tile”支持边界。静态 Tensor shape 与 bootstrap solver 大小限制继续生效。
+
+三种方案比较：
+
+| 方案 | 问题/取舍 | 决定 |
+| --- | --- | --- |
+| 同 root 直接 union/Attr== | offset、stride、rank reduction 后坐标不同；不同文本可语义相等；局部重叠不具备等值传递性 | 拒绝 |
+| 引入隐藏 canonical-root LayoutVar，所有 view 只连 root | 关系简洁，但没有显式 root binding 时，隐藏 root assignment 无法由实际物化 IR 独立取得，还需新增物化/验证规则 | 暂不引入 |
+| 保存每个实际 view→root 坐标映射，对同 root 的实际 views 做完整逐对兼容检查 | 多一些 pair constraints，但不用隐藏 assignment；可复用现有有限域与 actual-only verifier | **本阶段推荐**；候选生成仍可从有限 root 模板前向投影 |
+
+逐对检查不等于每次 worklist pop 枚举笛卡尔积：先缓存每个 endpoint/candidate 的 root 坐标与物理 bit 区间索引，再按共同坐标/排序区间检查。图构建须记录 pair 数与证明规模；第一阶段沿用小 component 限制，不声称大图复杂度已经解决。
+
+#### 18.2 坐标、地址原点与容量契约
+
+规范化记录：
+
+```text
+view v:
+  root identity + stable root key
+  T_v: view logical coordinates -> root logical coordinates
+  root static descriptor (shape / offset / strides / element bits / memory space)
+  root accessible span proof + view live domain + provenance
+```
+
+坐标变换由 Op 路径组合，不从 result descriptor 的 offset/strides 反解根坐标：
+
+- cast：同一 logical element 的恒等变换；可从静态 source 恢复中间 cast 隐去的事实，不能用动态 source 猜静态范围。实际 layout_view endpoint 仍须具有静态 ranked shape；允许中间 cast 丢信息、后续静态 endpoint 恢复，不扩展当前属性 verifier 为动态 shape 的值上下文验证器。
+- subview：保留维度满足 `q_i = offset_i + stride_i * x_j`；被降掉的维度固定为 `offset_i`。
+- 使用 MLIR Op 实际 rank-reduction mask；不能“删除所有 size=1 的维度”，因为这些维度也可能保留。
+- 逐层证明 `0 <= offset`、`offset + (size-1)*stride < sourceExtent`，检查整数溢出、正 live extent；嵌套时组合 T。
+- root 的静态 descriptor 必须可证明单射，拒绝 `strides=[1,1]` 等重叠歧义。未知 view 不透明穿透；ViewLike interface 只定位 source，不自动提供该 Op 的坐标语义。
+
+**统一地址契约（待确认的公共语义）**：Storage map 输出相对于共同 root 的 **aligned pointer** 的 `(byte_offset, bit_offset)`。物理区间为：
+
+```text
+A_v(x) = 8 * byte_offset_v(x) + bit_offset_v(x)
+I_v(x) = [A_v(x), A_v(x) + elementBits)
+```
+
+subview 的 descriptor offset 只用于坐标路径证明，不能在已 root-relative 的 map 输出上再加一次。显式 root binding 的 map 也使用同一原点。无 binding 时，root 的默认 linear 模板使用 `elementBits * (rootOffset + Σ rootStride_i*q_i)`；其他 root 模板必须声明相同地址原点、证明容量，不能沿用“忽略 root offset”行为。布局绑定表达新的物理布局契约，未绑定 root descriptor 用于确定 logical domain/可访问 span，并不强迫所有显式 swizzle 等于原线性地址公式。
+
+root nonzero offset 的前缀不是可随意使用的空间：可访问边界采用 `[elementBits*rootOffset, elementBits*(rootOffset + Σ(extent_i-1)*stride_i + 1))`，所有实际 map 区间须落在其中。对静态 alloc/alloca/get_global 追到真实根；外部参数只使用类型保证的该区间，不能推断更大的实际 allocation。中间 cast/subview 的 type span 不得扩大 root 的保证范围；binding 不改变 allocation 大小。
+
+容量是可访问地址上界/区间，不是元素总字节数；带 padding 时二者不同。单独通过 result memref type 的容量检查不够，还须证明 view live domain 位于 root 内。packed dtype 按 bit 区间计算，byte 容量向上取整，不能丢弃 bit offset。
+
+**具体例子（概念地址，不是已可运行的 M4 IR）：**
+
+```text
+root: 4x8xi32，offset=0，strides=[8,1]，linear S_r(r,c)=32r+4c bytes
+view: subview offsets=[1,2], sizes=[2,3], strides=[1,2]
+T_v(i,j)=(i+1, 2j+2)
+S_v(i,j)=32i+8j+40 bytes
+地址：{40,48,56,72,80,88}；每个元素占 4 bytes，root 容量 128 bytes。
+```
+
+同一 root 的另一个视图若也覆盖 `(1,2)`，该点必须为 byte 40；若它把另一个 root 元素放到 byte 40，则是非预期碰撞，也要拒绝。这个 view 的 map 与 root 的 map 文本不同是正常的，直接复制 `32i+4j` 则错误。
+
+若 root 另有 offset=3，其默认 linear 地址整体加 12 bytes，root 可访问区间从 byte 12 开始；本例 view 首元素为 byte 52，不能再加 subview descriptor offset。
+
+#### 18.3 AliasLayout 的兼容性与图不变量
+
+对同一可证明 root 的任意两个实际 view 候选：
+
+1. 若 `T_a(x)==T_b(y)`，两者必须有相同物理 bit 起点及元素区间。
+2. 若 root 坐标不同，两个物理元素区间不得相交，即使 logical views 不相交。
+3. 每个候选本身须通过 live-domain injectivity、bit/output bounds 和 root 容量验证。
+4. alignment/vector-granularity 是独立保证：按 root pointer 的真实对齐依据、投影后地址和实际使用条件共同验证；offset 可整除不等于绝对地址对齐。可信依据限定为 allocation/global 的显式对齐、已验证 ABI/参数前置契约，以及显式 whole-root binding 声明的前置契约（须记录 provenance，不能称运行时已证明）。没有依据不能推导更强对齐，只能降低推断保证或拒绝相应向量候选。child 的对齐要求不是 root 对齐证据；不得仅复制较强保证或因地址相同就认定所有 metadata 相等。
+
+所有同 root pairs 都覆盖，不能保留旧的邻接链。反例：`A∩B=∅, B∩C=∅, A∩C≠∅`，只连 A–B–C 会漏检 A/C 冲突；仅跳过逻辑不相交 pairs 还会漏检不同元素的物理碰撞。
+
+逐对约束验证的是**实际绑定视图覆盖域的联合一致性**，不是宣称未被任何 view 覆盖的 root 元素已经有唯一布局。若存在 root 的 whole-domain binding，它自然作为一个实际 endpoint 约束全部子视图；若不存在，不在 verifier 中求一个隐藏 root 解。此限制不授权对未绑定 root 的普通访问进行新布局 lowering。
+
+Alias payload 显式绑定各 endpoint 的 T/root/domain。现有 finalize 会排序 AliasLayout endpoints：新实现必须连 payload 一起 remap/交换，不能单独排序 vars。stable key 包含 root、endpoint、canonical transform；不得依赖 Value 指针排序。graph invariant 检查两端 storage kind、dtype/space、rank/domain、同 root 证据及有效的 var/constraint IDs。
+
+求解与物化核验共享**关系语义/证明实现**，但 actual verifier 的输入必须独立从当前 IR 重建；不能信任此前候选缓存或 solution 的未来转换计划。
+
+#### 18.4 有限候选准备、XOR 投影与反向规则
+
+先固定候选 origins，再冻结域，最后执行删减传播。禁止把任意 affine 正反向组合直接塞进现有增长 closure：
+
+- origins 来自显式 seeds 及每个 root/必要 endpoint 一次性的 target enumeration；用 stable origin ID 去重。
+- root 模板可按 `S_v = S_r ∘ T_v` 投影到实际 endpoint。显式 whole-root seed 和可证明全域可逆的 seed 也可成为 root origin，保留 M2 同域 alias 传播能力。
+- 切片不是满域双射。child seed 只能在既定有限候选中筛选 parent；不能“求逆”得到未观测元素的唯一布局。
+- 从 child 向其他 view 转移只有在后者覆盖域完全包含在该 child 的已知域且逆像唯一时才允许；否则不生成扩展。每个 `(origin, endpoint)` 最多生成一次规范投影，不经循环反复拼表达式。
+- 显式 seeds 本身保留为候选，兼容性交给 hard constraints；不能只因不属于默认模板就悄悄替换。无可用有限扩展候选时诊断“支持的候选域内无解”，不宣称数学上所有布局无解。
+- 新 alias 投影不得使已有 Tensor 变换 closure 无界；保持 M3 有限变换族/去重，并为新增关系明确 origin 上界。无法证明有限闭包的新增变换不在本阶段接入。
+
+非零 offset/非二次幂 stride 与 XOR 不能直接按 homogeneous GF(2) 合成：整数加法可能进位。例如 input bit 可写为 `(x floordiv 2^k) mod 2`，XOR output bit 是所选 bits 之和 mod 2。推荐把受支持的有限 bit-linear 映射精确转换为 affine floorDiv/mod 表达式，再与 T 组合，最后验证实际 live domain；零偏移纯 bit-linear 可保持快速路径。
+
+限制 bit width、表达式规模、算术溢出和 proof domain；沿用当前 65536 live-point 枚举上界作为首阶段精确验证界，超限返回 Unknown/unsupported，不增加截断采样“证明”。ProductLayoutMap 不是任意 composition wrapper，本阶段不扩展任意 affine×GF(2) 组合支持。无法表示的 proposal 可丢弃；显式 hard seed 无法证明或最终没有可证候选时必须诊断。
+
+候选兼容缓存按 graph/endpoint/origin 作用域管理，IR 改写后失效。RelationsOnly **不调用 target enumeration、不复制 alias seed、不投影、不求候选闭包**；只记录真实 bindings/RequireEncoding 和关系，随后用实际 IR assignment 设置 singleton 验证。
+
+#### 18.5 Region graph：保留 M3 语义，显式记录流向
+
+不再采用旧草案的固定 `incoming/blockArgument/yielded/result` 四字段一组结构。使用带 kind 的边，引用现有约束，避免重复构造 Convertible：
+
+| SCF 情况 | 需要保留的映射 |
+| --- | --- |
+| if | 每个 branch yield use → 对应 result slot；没有伪造 block argument |
+| for | init use → iterarg；iterarg 与 result SameLayout；yield use → carried slot |
+| while 输入 tuple I | init use → before arg；after yield use → before arg |
+| while 输出 tuple O | condition forwarded use → after arg/result；after arg 与 result SameLayout |
+| while predicate | i1 条件不是 forwarded tensor，不建立布局边 |
+
+I/O tuple 的 arity/type 可以不同，严禁按相同 index 把 before 与 after 强行等值。保留 zero-result、scalar condition 及已有嵌套 SCF 行为。
+
+拟新增接口示意（名字/字段可在批准后的实现评审中细化，语义不得弱化）：
 
 ```cpp
-struct RegionLayoutEdge {
-  Value incoming;
-  BlockArgument blockArgument;
-  Value yielded;
-  Value result;
+enum class RegionLayoutEdgeKind {
+  IfYield, ForInit, ForBackedge, ForResult,
+  WhileInit, WhileBackedge, WhileCondition, WhileResult
 };
-
-LogicalResult collectAliasGroups(Operation *root,
-                                 LayoutConstraintBuilder &builder);
-LogicalResult collectRegionEdges(Operation *root,
-                                 LayoutConstraintBuilder &builder);
+struct RegionLayoutEdge {
+  RegionLayoutEdgeKind kind;
+  LayoutVarID source;
+  LayoutVarID target;
+  LayoutConstraintID constraint;
+  Operation *owner;
+  OpOperand *use; // 槽位等值边允许为空；转换边必须是实际 operand use。
+  unsigned slot;
+  std::string stableKey;
+};
 ```
 
-- [ ] **Step 1: 写 alias/region 红灯测试**
+collector 建边与约束一次完成；finalize 后同步 remap IDs。graph dump 公开 kind/slot/stable key/constraint，pointer 只用于有效期内的定位。转换仍由 M3 solution 授权，在实际 init/yield/condition/consumer use 物化；本任务不增加跨 side effects 移动或隐式转换。
 
-覆盖 nested layout_view、memref.cast/subview、`scf.if` join、`scf.for` loop-carried tensor、循环回边需要多轮才能收敛，以及两个 alias storage seed 冲突。
+#### 18.6 单调删减 worklist 与可核验统计
 
-Run: `cmake --build build --target check-frisk --parallel 32`。
+graph finalize、候选准备完成后冻结 domains，建立各变量去重且按稳定 constraint ID 排序的 hard adjacency。stable FIFO 初始放入本阶段每条需执行 hard constraint 一次；inQueue 去重。pop 时先清 inQueue，只有实际 domain 缩小时才唤醒受影响变量的相邻约束。
 
-Expected: 至少一个 case FAIL 或 unresolved。
+Strict/Common 可共享 kernel，但各自保留现有关系启用条件；分别报告统计，避免把两次初始队列当成一次。Strict 的 adjacency/degree 必须包含本阶段所有潜在可执行关系，不能因当前尚无 singleton 就删除边；singleton 启用条件在 pop 时判断，后续 domain change 仍会唤醒它。删减阶段不得再 enumerate/project/addCandidate。每阶段定义：
 
-- [ ] **Step 2: 建立 storage alias groups**
+```text
+N0 = 初始候选总数
+Nf = 最终候选总数（失败时为已删减后的实际状态）
+C0 = 初始入队的约束数
+deletedCandidates = N0 - Nf <= N0
+domainChanges = 实际缩域事件数
+popUpperBound = C0 + Σ_events degree(changedVar)
+queuePops <= popUpperBound
+静态宽松界 = C0 + Σ_v |D_v(initial)| * degree(v)
+```
 
-使用 `ViewLikeOpInterface` 和 MLIR alias/view flow；同一底层 allocation 的 views 通过 `AliasLayout` 关联。关系保存 logical coordinate transform，不简单要求 Attr 文本相等。
+一次删除多个候选，deletedCandidates 按实际数量累计，domainChanges 按真实变量变化事件计。冲突路径也先计数再返回。degree 只计算该阶段能够被调度的硬约束；soft preference 不混入一致性证明。
 
-- [ ] **Step 3: 建立 structured region edges**
+统计还包含最终候选数、enqueue/最大队列长度、按 var 的 change 次数，以及候选准备 origins/projected candidates/proof evaluations（与删减统计分开）。测试核对逐项账本和静态界，不用“最多循环 N 次”掩盖振荡。确定性比较以稳定逻辑身份和相同输入域为前提，不要求不同语义/不同图有相同统计。
 
-为 `scf.if/for/while` 收集 block argument、yield、condition/result 映射。Region edge 是 hard constraint；转换只能插在 branch/yield 边界，不能跨越 side-effecting op。
+#### 18.7 验收矩阵（全部待编写/执行）
 
-- [ ] **Step 4: 验证循环 fixed-point**
+| 类别 | 最小正例 | 必须拒绝/揭露的反例 |
+| --- | --- | --- |
+| cast/view 链 | 同 dtype 静态 cast、nested layout_view；中间 cast 丢信息后在静态 endpoint 恢复 | 动态 source 无法证明、动态 shape endpoint、未知 ViewLike、dtype/memory-space reinterpret |
+| subview | 上述 4×8 例子；嵌套正 stride、降秩；size=1 维度保留/删除分别覆盖 | 越 root 边界、非正 stride、零 live extent、算术溢出、动态 offset/size/stride |
+| 地址原点/容量 | root offset=3 首元素 byte 52；root 容量大于 view span；packed bit 区间 | offset 重复叠加、利用 root 前缀、仅凭扩大后的 view type 通过容量检查 |
+| 对齐 | root 对齐契约 + 投影地址共同支持较弱的 view 对齐 | 仅凭相对 offset 整除推断更强绝对对齐；child 要求倒推 root 保证 |
+| alias 兼容 | 不同 Attr 文本但同实际地址；不同视图的部分重叠 | A/B/C 非邻接冲突；不同 logical 元素物理区间碰撞；非单射 root |
+| 投影与反向 | XOR+offset=1/stride，逐点独立预期；切片兼容多个 parent 候选不误锁定 | 把 offset 当 XOR；逆切片伪造全域；表达式/证明域超限却接受 |
+| candidate/RelationsOnly | counting target 证明 actual verifier 不枚举；带 bound/unbound storage aliases | seed 复制或 projection 偷渡到 RelationsOnly；依赖未物化 root/未来 conversion 通过 |
+| SCF | nested if/for/while；不同 arity/type I/O tuples、zero result；回边确实多次缩域 | predicate 进入布局域、before/after 误强绑、漏掉 yield/condition 约束 |
+| 统计/确定性 | 同一稳定图不同插入顺序，assignment/IR/统计相同；逐次删除/pop 可对账 | 超删除界、伪造 change、全图扫描计成依赖 pop、固定 N 次掩盖未收敛 |
+| 独立核验/事务性 | 物化后重收集实际绑定，所有 pair/region constraints 成立 | 篡改一个 view 地址被 actual verifier 拒绝；任意失败保持原 IR 逐字不变 |
 
-Worklist 必须在 loop backedge 上收敛。记录初始候选总数、成功删除候选数和 queue pop 数：成功删除数不得超过初始候选总数；queue pop 数不得超过 `初始约束数 + Σ(每次 domain change 的相邻约束数)`。测试按这一由单调 lattice 和实际 degree 推导的上界断言，不使用固定“最多循环 N 次”掩盖振荡。
+证明失败需区分 Disproven（首个 view/root 坐标、bit 区间或边界反例）和 Unknown（具体动态项/表示限制/预算）；均不得当作硬关系成功。诊断包含 root/view stable key、源位置和 provenance 链，不以 assertion 处理用户 IR。
 
-Run:
+#### 18.8 预期文件与实施顺序（确认后执行）
+
+**Files（拟定，不代表本轮已创建）：**
+
+- Create: `include/Dialect/Frisk/Analysis/LayoutAliasAnalysis.h`
+- Create: `lib/Dialect/Frisk/Analysis/LayoutAliasAnalysis.cpp`
+- Modify: `include/Dialect/Frisk/Analysis/LayoutConstraint.h`、`LayoutSolver.h`
+- Modify: `lib/Dialect/Frisk/Analysis/LayoutConstraint.cpp`、`LayoutRelations.cpp`、`LayoutPropagation.cpp`、`LayoutVerifier.cpp`、`DistributedLayoutConstraints.cpp`
+- Modify: `lib/Dialect/Frisk/Transforms/MaterializeLayouts.cpp`
+- Modify: `lib/Dialect/Frisk/Target/SM90/SM90LayoutTarget.cpp`（root-relative 候选适配，不引入 cost solver）
+- Modify: `include/Dialect/Frisk/IR/FriskLayoutAttrs.td`、`FriskLayoutOps.td` 及对应 verifier/实现（公共地址契约）
+- Modify: Analysis/unit CMake；`guoqiao/layout_inference_design.md`、本计划和比较文档
+- Create: `unittests/Dialect/Frisk/Layout/AliasRegionTest.cpp`
+- Create: `test/Transforms/layout-alias.mlir`、`layout-scf-fixed-point.mlir`
+
+- [ ] **Step 1：确认设计后建立隔离实现工作区，编写红灯测试。** 先复用 M3 regression，再添加 offset/stride/rank-reduction 与真实回边反例，确认因能力缺失失败。
+- [ ] **Step 2：实现坐标规范化与 AliasLayout 证明。** 定义 root-relative 契约、容量与 pair invariants，优先支持显式 bindings 的独立核验，再实现有限候选投影。
+- [ ] **Step 3：实现显式 region edges。** 复用 M3 SCF 关系，不重复建转换边；补全 dump/finalize remap/invariant 测试。
+- [ ] **Step 4：替换传播调度并公开统计。** 冻结候选域后执行 stable worklist；验证两阶段删除/pop 上界、冲突计数与确定性。
+- [ ] **Step 5：接入 actual-only verifier 与原子物化。** 不允许用 speculative root/候选修补实际 IR；运行篡改布局和 rollback 用例。
+- [ ] **Step 6：完整 Gate 和独立审查。** 除下述命令外，逐项完成 §18.7；将实测数量、实现限制和偏离设计的理由同步两份长期文档。
 
 ```bash
-cmake --build build --target FriskLayoutUnitTests check-frisk --parallel 32
-./build/unittests/Dialect/Frisk/FriskLayoutUnitTests \
-  --gtest_filter='AliasRegionTest.*'
+cmake --build build --target FriskLayoutUnitTests check-frisk \
+  frisk_attr_test frisk_reduce_layout_test frisk_layout_pass_test \
+  frisk_memory_effect_test --parallel 32
+./build/unittests/Dialect/Frisk/FriskLayoutUnitTests
+ctest --test-dir build --output-on-failure
+git diff --check
 ```
 
-Expected: PASS。
+Expected：新增 alias/region 测试及全部 M0–M3 regression PASS；实际 IR 核验通过，失败路径不改 IR；统计满足推导界。不以旧 27/74/4 数量充当新增功能验收。
 
-- [ ] **Step 5: 提交 alias/region 支持**
-
-```bash
-git add lib/Dialect/Frisk test unittests
-git commit -m "feat: propagate layouts through aliases and regions"
-```
+- [ ] **Step 7：按授权提交与集成。** 提交范围显式列出新代码、测试与同步文档，不包含用户独立 README；是否 push/merge 另按用户指示。本轮停止在设计确认前。
 
 ### Task 19: 迁移 Copy、Fill 和 Parallel 约束
 
@@ -2175,9 +2376,9 @@ Expected: FAIL，内部 MMA Op/constraints 尚不存在。
 
 Op 只保存数学 tile 语义和 policy，不保存 PTX mnemonic。A/B 可为 Shared MemRef view 或 RankedTensor；init/result 必须是 RankedTensor。Verifier 只检查 shape/dtype 的数学一致性，SM90 合法性放 target rules。
 
-- [ ] **Step 3: 从现有 Gemm 逻辑提取 canonical candidates**
+- [ ] **Step 3: 审核新旧 Gemm 语义后提取 canonical candidates**
 
-将 `FriskOps.cpp:1285-1406` 的 target/layout 构造移动到 `SM90GemmConstraints.cpp`，输出 `InstructionContract`、`RequireEncoding` 候选和 provenance；不得直接写 layout map。
+以 `FriskOps.cpp` 的旧 Gemm target/layout 构造为迁移输入（历史定位 1285–1406 行，实施时按符号重新定位），对照固定新版 TileLang 的参数/annotations、read-before-write 和硬件契约审核后迁入 `SM90GemmConstraints.cpp`。输出 `InstructionContract`、`RequireEncoding` 候选和 provenance；不得直接写 layout map，也不得机械搬用旧 positional args 下标。
 
 ```text
 A/B shared -> Storage candidates + WGMMA descriptor contract
@@ -2187,7 +2388,7 @@ result/init -> Mma/Distributed accumulator candidates
 
 - [ ] **Step 4: 与 legacy Gemm 枚举差分**
 
-对现有 `sm80_ss`、`sm90_ss` 和 local/shared 组合，比较新候选中至少存在一个与 legacy map 数学等价的 assignment；新系统可另外保留更优候选。
+对现有 `sm80_ss`、`sm90_ss` 和 local/shared 组合先分类：已知正确且适用当前 SM90 契约的 case 要有数学等价候选；SM80-only case 仅作 adapter 回归，不能因此扩展本阶段 target。旧 bug、非法 owner/地址、已过时协议按独立坐标和硬件契约修正，记录新旧输出、原因和反例，不要求复现旧错误。新版新增行为单独测试；新系统可保留其他合法候选，未运行成本实验不能称其更优。
 
 - [ ] **Step 5: 运行 tests**
 
@@ -2253,7 +2454,7 @@ Verifier 检查 result shape 等于删除 reduce dim 后的 shape、dtype/kind �
 
 - [ ] **Step 4: 与 legacy Reduce cases 差分**
 
-复用 `reduce_layout_test.cpp` case table，比较 output coordinate、replication 和 owner，而不是 Attr 文本。
+复用 `reduce_layout_test.cpp` 已知正确的 case table，比较 output coordinate、replication 和 owner，而不是 Attr 文本。对照新版 TileLang 区分普通 Fragment 的同值 replica 与 PartialFragment 的 addend/copy groups；传统 Reduce 与 reducer epoch 是不同机制，不因后者更新就宣称前者全面双向化。先列出本任务实际接入子集和不支持诊断；旧错误用独立 reduction/owner 不变量修正并记录差异，不强求 legacy 等价。
 
 - [ ] **Step 5: 运行 tests**
 
@@ -2829,6 +3030,8 @@ git commit -m "test: add layout property and determinism coverage"
 
 ### Task 28: 建立固定 TileLang 语义差分 corpus
 
+**参考版本决策（2026-09-12）：** 本任务尚未执行。以下 schema/exporter/命令的拟定主基线升级为本轮审计的 `5e149e3`；这不是已经更新或运行了 corpus。旧 `6623b12` 可另存带版本标签的历史回归，不混入新版 schema。PartialFragment/combine 语义若纳入 corpus，须先扩展 schema 区分 addends 与同值 copy groups；不得继续仅以 replication 数字代表全部语义。
+
 **Files:**
 
 - Create: `tools/layout-reference/export_tilelang_layouts.py`
@@ -2843,7 +3046,7 @@ git commit -m "test: add layout property and determinism coverage"
 ```json
 {
   "schema_version": 1,
-  "tilelang_commit": "6623b12d232b343648a5ba99992e3e6f0d6376d2",
+  "tilelang_commit": "5e149e31674658f94779c7d0c6039549a1853123",
   "cases": [
     {
       "name": "sm90_bf16_gemm_128x128x64",
@@ -2874,7 +3077,7 @@ Expected: FAIL，corpus/reader 尚不存在。
 脚本启动时执行：
 
 ```python
-expected = "6623b12d232b343648a5ba99992e3e6f0d6376d2"
+expected = "5e149e31674658f94779c7d0c6039549a1853123"
 if args.revision != expected:
     raise SystemExit(f"unsupported TileLang revision: {args.revision}")
 actual = subprocess.check_output(
@@ -2902,23 +3105,25 @@ unused/floating fragment
 owner compatibility
 ```
 
-不得直接从 `/home/baopeihua/tilelang` 当前 checkout 导入模块。先以 pinned commit 创建 detached worktree，再让 exporter 检查该 worktree 的 `HEAD`：
+不得直接从 `/home/baopeihua/tilelang` 当前 checkout 导入模块，也不假定其中已有新版对象。在独立 reference clone 中获取 pinned commit，再创建 detached worktree；clone 的 main 不作为语义参考，exporter 必须检查 worktree 的精确 `HEAD`。以下路径是任务实施时新建的示例，已存在时先检查而非覆盖：
 
 ```bash
-git -C /home/baopeihua/tilelang worktree add --detach \
-  /tmp/tilelang-layout-reference-6623b12d \
-  6623b12d232b343648a5ba99992e3e6f0d6376d2
+git clone --no-checkout https://github.com/tile-ai/tilelang.git \
+  /tmp/tilelang-layout-reference-repo
+git -C /tmp/tilelang-layout-reference-repo worktree add --detach \
+  /tmp/tilelang-layout-reference-5e149e3 \
+  5e149e31674658f94779c7d0c6039549a1853123
 python tools/layout-reference/export_tilelang_layouts.py \
-  --tilelang /tmp/tilelang-layout-reference-6623b12d \
-  --revision 6623b12d232b343648a5ba99992e3e6f0d6376d2 \
+  --tilelang /tmp/tilelang-layout-reference-5e149e3 \
+  --revision 5e149e31674658f94779c7d0c6039549a1853123 \
   --output test/Dialect/Frisk/layout/Inputs/tilelang_layout_corpus.json
 ```
 
 Expected: exporter 成功，第二次执行产生完全相同文件。生成和审计结束后可执行：
 
 ```bash
-git -C /home/baopeihua/tilelang worktree remove \
-  /tmp/tilelang-layout-reference-6623b12d
+git -C /tmp/tilelang-layout-reference-repo worktree remove \
+  /tmp/tilelang-layout-reference-5e149e3
 ```
 
 Exporter 还必须把 pinned worktree 插入独立 Python 进程的首个 import path，并拒绝从系统 site-packages 导入 TileLang；启动日志打印实际导入模块路径和 commit，文档审计时一并核对。
